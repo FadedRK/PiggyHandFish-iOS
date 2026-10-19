@@ -6,6 +6,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL enabled;
 @property (nonatomic, assign) BOOL logClasses;
 @property (nonatomic, assign) BOOL logMethods;
+@property (nonatomic, assign) BOOL logClassMethods;
 @property (nonatomic, assign) BOOL logStacks;
 @property (nonatomic, copy) NSString *classRegex;
 @property (nonatomic, copy) NSString *methodRegex;
