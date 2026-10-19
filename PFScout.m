@@ -2,6 +2,7 @@
 #import "PFConfig.h"
 #import "PFLogger.h"
 #import <objc/runtime.h>
+#import <stdlib.h>
 
 static BOOL PFMatches(NSString *text, NSString *pattern) {
     if (pattern.length == 0) return YES;
@@ -17,9 +18,12 @@ static BOOL PFMatches(NSString *text, NSString *pattern) {
     return [regex firstMatchInString:text options:0 range:NSMakeRange(0, text.length)] != nil;
 }
 
-static void PFLogMethods(Class cls, PFConfig *config) {
+static void PFLogMethodList(Class reportedClass,
+                            Class methodOwner,
+                            BOOL isClassMethod,
+                            PFConfig *config) {
     unsigned int count = 0;
-    Method *methods = class_copyMethodList(cls, &count);
+    Method *methods = class_copyMethodList(methodOwner, &count);
     NSUInteger emitted = 0;
 
     for (unsigned int i = 0; i < count && emitted < config.maxMethodsPerClass; i++) {
@@ -27,17 +31,36 @@ static void PFLogMethods(Class cls, PFConfig *config) {
         NSString *name = NSStringFromSelector(selector);
         if (!PFMatches(name, config.methodRegex)) continue;
 
-        PFLog(@"  method: -[%s %@] types=%s",
-              class_getName(cls), name, method_getTypeEncoding(methods[i]));
+        const char *types = method_getTypeEncoding(methods[i]);
+        PFLog(@"  method: %c[%s %@] types=%s",
+              isClassMethod ? '+' : '-',
+              class_getName(reportedClass),
+              name,
+              types ?: "(unknown)");
         emitted++;
     }
+
     free(methods);
+}
+
+static void PFLogMethods(Class cls, PFConfig *config) {
+    if (config.logMethods) {
+        PFLogMethodList(cls, cls, NO, config);
+    }
+
+    if (config.logClassMethods) {
+        // Objective-C class methods are instance methods on the metaclass.
+        Class metaClass = object_getClass(cls);
+        if (metaClass) {
+            PFLogMethodList(cls, metaClass, YES, config);
+        }
+    }
 }
 
 void PFStartScout(void) {
     PFConfig *config = PFGetConfig();
-    if (!config.logClasses && !config.logMethods) {
-        PFLog(@"Class and method logging are both disabled.");
+    if (!config.logClasses && !config.logMethods && !config.logClassMethods) {
+        PFLog(@"Class, instance-method, and class-method logging are all disabled.");
         return;
     }
 
@@ -60,13 +83,19 @@ void PFStartScout(void) {
         classRegex = [NSRegularExpression regularExpressionWithPattern:config.classRegex
                                                                options:0
                                                                  error:&error];
-        if (error) PFLog(@"Invalid class regex '%@': %@", config.classRegex, error.localizedDescription);
+        if (error || !classRegex) {
+            PFLog(@"Invalid class regex '%@': %@", config.classRegex,
+                  error.localizedDescription ?: @"unknown error");
+            free(classes);
+            return;
+        }
     }
 
     NSUInteger matched = 0;
     for (int i = 0; i < classCount && matched < config.maxClasses; i++) {
         const char *rawName = class_getName(classes[i]);
         if (!rawName) continue;
+
         NSString *name = [NSString stringWithUTF8String:rawName];
         if (!name) continue;
 
@@ -76,7 +105,7 @@ void PFStartScout(void) {
 
         matched++;
         if (config.logClasses) PFLog(@"class: %s", rawName);
-        if (config.logMethods) PFLogMethods(classes[i], config);
+        if (config.logMethods || config.logClassMethods) PFLogMethods(classes[i], config);
     }
 
     PFLog(@"Runtime scan complete. Total runtime classes: %d; matched classes: %lu",
