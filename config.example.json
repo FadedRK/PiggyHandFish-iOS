@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "logClasses": true,
+  "logMethods": false,
+  "logStacks": false,
+  "classRegex": "(?i)(idle|fish|task|coin|reward)",
+  "methodRegex": ".*",
+  "maxClasses": 120,
+  "maxMethodsPerClass": 80
+}
