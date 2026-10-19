@@ -2,15 +2,30 @@
 
 iOS runtime reconnaissance dylib for TrollFools on **iOS 17.0**.
 
-This repository is an initial, reconnaissance-only project intended to help identify Objective-C runtime classes and methods in an app you are authorized to inspect. It does not automate account actions or collect credentials, cookies, tokens, request bodies, or network traffic.
+This repository is an initial, reconnaissance-only project intended to identify Objective-C runtime classes and methods in an app you are authorized to inspect. It does not automate account actions or collect credentials, cookies, tokens, request bodies, or network traffic.
 
 ## Current features
 
-- Logs that the dylib was loaded, plus the target bundle identifier and app version.
+- Logs the dylib load marker, target bundle identifier, app version, and build.
 - Enumerates Objective-C runtime classes matching a configurable regular expression.
-- Optionally lists instance methods for matched classes.
+- Optionally lists instance methods and class methods for matched classes.
+- Filters method names to reduce log volume.
 - Writes diagnostics to the system log and to a temporary file named `piggyhandfish.log`.
-- Includes conservative default limits to avoid excessively large logs.
+
+## Target and initial findings
+
+The supplied local executable named `Runner` was inspected statically. It is a 64-bit ARM64 Mach-O executable. Strings and symbols include Xianyu identifiers such as `com.taobao.fleamarket`, `idlefish_im_core`, and the route `fleamarket://fish_coin_game`.
+
+Coin-game-related candidate names found in the executable include:
+
+- `FMCoinGameInterceptor`, with selector strings `interceptProcess:` and `openFishCoinGameWithQuery:`
+- `FMCoinGameJumpUrlSwitch` and `FMCoinGameOnceCompletion`
+- `FishCoinPlugin` and `FishCoinMethodPlugin`
+- `HomeFishCoinEntranceView`
+- `FishSyncJumpNewFishCoinEventObject`
+- `AppIntentFishCoin` and `WVFishCoin`
+
+These are static-analysis leads, not proof that every candidate is registered in the runtime or that a particular call sequence has been confirmed. The executable itself is not stored in this repository.
 
 ## Requirements
 
@@ -26,16 +41,15 @@ From the repository root on a machine configured with Theos:
 make clean package FINALPACKAGE=1
 ```
 
-The package output is written to `.theos/packages/`. Review the build output and target app compatibility before installing anything on a device.
+The package output is written to `.theos/packages/`. This code has not yet been confirmed as successfully compiled or tested on-device.
 
 ## Reconnaissance workflow
 
-1. Build the dylib and inject it into an app you are authorized to inspect.
+1. Build the dylib and inject it into the app you are authorized to inspect.
 2. Confirm that the `PiggyHandFish` load marker appears in the system log.
-3. Start with the default narrow class expression. Keep `logMethods` disabled initially.
-4. Refine the class expression based on observed class names.
-5. Enable method logging only for a narrow set of classes when needed.
-6. Save and review the resulting diagnostic log before designing any app-specific adapter.
+3. Review the filtered class, instance-method, and class-method results.
+4. Narrow the class and method expressions based on the actual runtime output.
+5. Save the diagnostic log before designing any app-specific adapter.
 
 The initial configuration is compiled in `PFConfig.m`; `config.example.json` documents the available settings. JSON runtime loading is not implemented yet.
 
@@ -53,7 +67,7 @@ On iOS this usually resolves inside the target app's temporary container. System
 
 - This is not yet an implementation of the Android LSPosed module's features.
 - Android Java/Xposed classes do not map directly to iOS Objective-C runtime classes.
-- The scout currently lists Objective-C runtime classes and **instance methods** only; it does not enumerate class methods or Swift-only symbols.
+- Runtime introspection does not enumerate Swift-only symbols or prove that a discovered method is safe to invoke.
 - `logStacks` is reserved for future work and is currently not used.
 - Do not use this project to access other users' accounts, secrets, or private data.
 
@@ -62,7 +76,7 @@ On iOS this usually resolves inside the target app's temporary container. System
 - `Tweak.m` — dylib entry point
 - `PFConfig.h/.m` — reconnaissance options
 - `PFLogger.h/.m` — system and file logging
-- `PFScout.h/.m` — runtime class and instance-method enumeration
+- `PFScout.h/.m` — runtime class and method enumeration
 - `Tweak.xm` — optional placeholder for future Logos work
 - `config.example.json` — settings reference
 
