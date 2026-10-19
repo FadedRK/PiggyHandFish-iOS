@@ -1,10 +1,11 @@
 {
   "enabled": true,
   "logClasses": true,
-  "logMethods": false,
+  "logMethods": true,
+  "logClassMethods": true,
   "logStacks": false,
-  "classRegex": "(?i)(idle|fish|task|coin|reward)",
-  "methodRegex": ".*",
-  "maxClasses": 120,
-  "maxMethodsPerClass": 80
+  "classRegex": "(?i)(FMCoinGame|FishCoin|FishSyncJumpNewFishCoinEventObject|HomeFishCoinEntranceView|AppIntentFishCoin|WVFishCoin|IdleCoinGame)",
+  "methodRegex": "(?i)(coin|fish|task|game|intercept|jump|url|process|sign|reward|methodcall|invoke)",
+  "maxClasses": 80,
+  "maxMethodsPerClass": 100
 }
