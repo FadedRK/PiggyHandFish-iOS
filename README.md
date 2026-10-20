@@ -72,7 +72,7 @@ The dylib is written under `.theos/obj/`. This code has not yet been confirmed a
 
 ## CI build artifact
 
-Every push to main starts the **Build iOS dylib** GitHub Actions workflow. Open the [Actions page](https://github.com/FadedRK/PiggyHandFish-iOS/actions), select a successful run, and download the generated artifact. A failed run does not produce a usable dylib.
+Every push to main starts the **Build iOS dylib** GitHub Actions workflow. It uses the same `waruhachi/theos-action` toolchain family as the ZolaCN project and combines arm64/arm64e slices into one universal dylib. Open the [Actions page](https://github.com/FadedRK/PiggyHandFish-iOS/actions), select a successful run, and download the generated artifact. A failed run does not produce a usable dylib.
 
 ## Reconnaissance workflow
 
