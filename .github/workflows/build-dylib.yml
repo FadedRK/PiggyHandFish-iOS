@@ -1,0 +1,44 @@
+name: Build iOS dylib
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build PiggyHandFish dylib
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Prepare Theos toolchain and iOS SDK
+        uses: Randomblock1/theos-action@v1
+
+      - name: Compile dylib
+        shell: bash
+        run: |
+          set -euo pipefail
+          make clean
+          make
+          mkdir -p artifacts
+          find .theos -type f -name '*.dylib' -exec cp -v '{}' artifacts/ \;
+          if ! find artifacts -type f -name '*.dylib' -print -quit | grep -q .; then
+            echo "No dylib was produced by the Theos build." >&2
+            find .theos -maxdepth 6 -type f -print || true
+            exit 1
+          fi
+          ls -lh artifacts
+
+      - name: Upload dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PiggyHandFish-iOS-${{ github.sha }}
+          path: artifacts/*.dylib
+          if-no-files-found: error
+          retention-days: 14
