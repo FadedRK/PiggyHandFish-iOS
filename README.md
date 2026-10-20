@@ -7,10 +7,27 @@ This repository is an initial, reconnaissance-only project intended to identify 
 ## Current features
 
 - Logs the dylib load marker, target bundle identifier, app version, and build.
+- Adds a floating **“猪手” plugin entry** to the host app window.
+- Opens a control panel with a manual runtime scan, session-only logging toggles, runtime status, and diagnostic log export.
 - Enumerates Objective-C runtime classes matching a configurable regular expression.
 - Optionally lists instance methods and class methods for matched classes.
 - Filters method names to reduce log volume.
 - Writes diagnostics to the system log and to a temporary file named `piggyhandfish.log`.
+
+## Plugin entry
+
+After injection, look for the floating orange **猪手** button near the lower-right side of the app. Tap it to open the panel.
+
+Available controls:
+
+- **立即运行侦察** — run the current runtime scan again.
+- **类名日志 / 实例方法日志 / 类方法日志** — turn individual log categories on or off for this process session.
+- **查看运行状态** — view bundle/version, filters, toggles, and log path.
+- **复制诊断日志 / 复制日志文件路径** — copy diagnostic text or the file path to the clipboard.
+
+The logging toggles currently affect the running process only; they are not persisted after the app exits. The entry is installed when a foreground app window becomes available. If no active window appears, installation is retried for a short period and again when the app becomes active.
+
+The current panel contains only controls implemented in this reconnaissance build. It does not claim that the Android action engine has been ported.
 
 ## Target and initial findings
 
@@ -25,7 +42,7 @@ Coin-game-related candidate names found in the executable include:
 - `FishSyncJumpNewFishCoinEventObject`
 - `AppIntentFishCoin` and `WVFishCoin`
 
-These are static-analysis leads, not proof that every candidate is registered in the runtime or that a particular call sequence has been confirmed. The executable itself is not stored in this repository.
+These are static-analysis leads, not proof that every class is registered in the runtime or that a particular call sequence has been confirmed. The executable itself is not stored in this repository.
 
 ## Requirements
 
@@ -47,9 +64,10 @@ The package output is written to `.theos/packages/`. This code has not yet been 
 
 1. Build the dylib and inject it into the app you are authorized to inspect.
 2. Confirm that the `PiggyHandFish` load marker appears in the system log.
-3. Review the filtered class, instance-method, and class-method results.
-4. Narrow the class and method expressions based on the actual runtime output.
-5. Save the diagnostic log before designing any app-specific adapter.
+3. Tap the floating entry and use **立即运行侦察** to repeat a scan.
+4. Enable only the log categories needed for the next scan.
+5. Export the diagnostic log from the panel and review the results.
+6. Narrow the class and method expressions based on the actual runtime output.
 
 The initial configuration is compiled in `PFConfig.m`; `config.example.json` documents the available settings. JSON runtime loading is not implemented yet.
 
@@ -74,6 +92,7 @@ On iOS this usually resolves inside the target app's temporary container. System
 ## Project structure
 
 - `Tweak.m` — dylib entry point
+- `PFPluginEntry.h/.m` — floating plugin button and control panel
 - `PFConfig.h/.m` — reconnaissance options
 - `PFLogger.h/.m` — system and file logging
 - `PFScout.h/.m` — runtime class and method enumeration
