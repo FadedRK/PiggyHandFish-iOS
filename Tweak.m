@@ -15,10 +15,13 @@ static void PFStart(void) {
     PFLog(@"App version: %@", PFBundleValue(@"CFBundleShortVersionString"));
     PFLog(@"Build: %@", PFBundleValue(@"CFBundleVersion"));
 
+    // Schedule UI installation before starting the potentially verbose runtime scan.
     PFInstallPluginEntry();
 
     if (PFGetConfig().enabled) {
-        PFStartScout();
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            PFStartScout();
+        });
     } else {
         PFLog(@"Reconnaissance is disabled by configuration.");
     }
