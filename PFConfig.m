@@ -1,5 +1,8 @@
 #import "PFConfig.h"
 
+@implementation PFConfig
+@end
+
 PFConfig *PFGetConfig(void) {
     static PFConfig *config;
     static dispatch_once_t onceToken;
