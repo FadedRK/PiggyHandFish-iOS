@@ -248,7 +248,6 @@ static NSString *PFPluginLogPath(void) {
     }
 
     PFConfig *config = PFGetConfig();
-    __weak typeof(self) weakSelf = self;
     [self addToggleActionToSheet:sheet title:@"类名日志" value:config.logClasses set:^(BOOL value) {
         PFGetConfig().logClasses = value;
     }];
