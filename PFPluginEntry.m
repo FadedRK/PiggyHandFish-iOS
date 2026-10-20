@@ -13,8 +13,12 @@ static NSString * const PFSettingsOriginalViewDidAppear = @"pfh_original_viewDid
 
 @interface PFPluginEntryManager : NSObject
 @property (nonatomic, weak) UIViewController *settingsHost;
+@property (nonatomic, weak) UIViewController *routeOverlayHost;
+@property (nonatomic, strong) UIButton *routeEntryButton;
 + (instancetype)shared;
 - (void)settingsControllerDidAppear:(UIViewController *)controller;
+- (void)installRouteEntryOverlayOnController:(UIViewController *)controller;
+- (void)removeRouteEntryOverlay;
 - (void)openPluginSettings;
 @end
 
@@ -56,6 +60,78 @@ static NSString * const PFSettingsOriginalViewDidAppear = @"pfh_original_viewDid
     PFLog(@"Settings entry installed on %@ (title=%@)",
           NSStringFromClass(controller.class),
           controller.navigationItem.title ?: controller.title ?: @"(untitled)");
+}
+
+- (void)installRouteEntryOverlayOnController:(UIViewController *)controller {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self installRouteEntryOverlayOnController:controller];
+        });
+        return;
+    }
+    if (!controller || !controller.isViewLoaded || !controller.view.window) {
+        PFLog(@"Settings route detected, but the target view is not in a window yet.");
+        return;
+    }
+
+    self.settingsHost = controller;
+    if (self.routeEntryButton && self.routeOverlayHost == controller &&
+        self.routeEntryButton.superview == controller.view) {
+        self.routeEntryButton.hidden = NO;
+        return;
+    }
+
+    [self.routeEntryButton removeFromSuperview];
+    self.routeOverlayHost = controller;
+
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    button.accessibilityLabel = @"打开 PiggyHandFish 插件面板";
+    button.accessibilityHint = @"打开猪手插件的 Runtime 侦察与诊断设置";
+    button.backgroundColor = [UIColor colorWithRed:0.95 green:0.43 blue:0.16 alpha:0.97];
+    [button setTitle:@"猪手" forState:UIControlStateNormal];
+    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    button.layer.cornerRadius = 17.0;
+    button.layer.borderWidth = 1.0;
+    button.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.85].CGColor;
+    button.layer.shadowColor = UIColor.blackColor.CGColor;
+    button.layer.shadowOpacity = 0.22;
+    button.layer.shadowRadius = 5.0;
+    button.layer.shadowOffset = CGSizeMake(0, 2);
+    button.layer.zPosition = 9999.0;
+    button.exclusiveTouch = YES;
+    [button addTarget:self action:@selector(openPluginSettings)
+     forControlEvents:UIControlEventTouchUpInside];
+
+    [controller.view addSubview:button];
+    self.routeEntryButton = button;
+    UILayoutGuide *safeArea = controller.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [button.trailingAnchor constraintEqualToAnchor:safeArea.trailingAnchor constant:-12.0],
+        [button.topAnchor constraintEqualToAnchor:safeArea.topAnchor constant:8.0],
+        [button.widthAnchor constraintEqualToConstant:56.0],
+        [button.heightAnchor constraintEqualToConstant:34.0]
+    ]];
+
+    PFLog(@"Settings route overlay installed on %@ (view=%@).",
+          NSStringFromClass(controller.class),
+          NSStringFromClass(controller.view.class));
+}
+
+- (void)removeRouteEntryOverlay {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self removeRouteEntryOverlay];
+        });
+        return;
+    }
+    if (self.routeEntryButton) {
+        [self.routeEntryButton removeFromSuperview];
+        PFLog(@"Settings route overlay removed after a different app route.");
+    }
+    self.routeEntryButton = nil;
+    self.routeOverlayHost = nil;
 }
 
 - (UIViewController *)topViewControllerFrom:(UIViewController *)controller {
@@ -318,51 +394,39 @@ static void PFSettingsViewDidAppear(UIViewController *self, SEL command, BOOL an
     });
 }
 
-static NSString *PFRouteString(id route) {
-    if (!route || route == [NSNull null]) return @"";
+static NSString *PFRouteStringDepth(id route, NSUInteger depth) {
+    if (!route || route == [NSNull null] || depth > 3) return @"";
     if ([route isKindOfClass:[NSString class]]) return route;
     if ([route isKindOfClass:[NSURL class]]) return [(NSURL *)route absoluteString];
-    @try {
-        id absoluteString = [route valueForKey:@"absoluteString"];
-        if ([absoluteString isKindOfClass:[NSString class]]) return absoluteString;
-    } @catch (__unused NSException *exception) {}
+
+    NSArray<NSString *> *keys = @[@"urlString", @"urlPath", @"absoluteString", @"url", @"path"];
+    for (NSString *key in keys) {
+        @try {
+            id value = [route valueForKey:key];
+            if (value && value != route) {
+                NSString *candidate = PFRouteStringDepth(value, depth + 1);
+                if (candidate.length &&
+                    ([candidate.lowercaseString containsString:@"fleamarket://"] ||
+                     [candidate.lowercaseString containsString:@"flutter_settings"])) {
+                    return candidate;
+                }
+            }
+        } @catch (__unused NSException *exception) {}
+    }
+
+    if ([route isKindOfClass:[NSDictionary class]]) {
+        for (NSString *key in keys) {
+            id value = ((NSDictionary *)route)[key];
+            NSString *candidate = PFRouteStringDepth(value, depth + 1);
+            if (candidate.length) return candidate;
+        }
+    }
+
     return [route description] ?: @"";
 }
 
-static BOOL PFClassDefinesSelector(Class cls, SEL selector) {
-    if (!cls || !selector) return NO;
-    unsigned int count = 0;
-    Method *methods = class_copyMethodList(cls, &count);
-    BOOL found = NO;
-    for (unsigned int i = 0; i < count; i++) {
-        if (method_getName(methods[i]) == selector) {
-            found = YES;
-            break;
-        }
-    }
-    free(methods);
-    return found;
-}
-
-static char PFNavigatorPushReturnKind(Method method) {
-    if (!method || method_getNumberOfArguments(method) != 6) return '\0';
-
-    char *returnType = method_copyReturnType(method);
-    char kind = returnType ? returnType[0] : '\0';
-    free(returnType);
-    if (kind != 'v' && kind != '@') return '\0';
-
-    for (unsigned int index = 2; index <= 4; index++) {
-        char *type = method_copyArgumentType(method, index);
-        BOOL isObject = type && (type[0] == '@' || type[0] == '#');
-        free(type);
-        if (!isObject) return '\0';
-    }
-
-    char *lastType = method_copyArgumentType(method, 5);
-    BOOL isBoolean = lastType && (lastType[0] == 'B' || lastType[0] == 'c' || lastType[0] == 'C');
-    free(lastType);
-    return isBoolean ? kind : '\0';
+static NSString *PFRouteString(id route) {
+    return PFRouteStringDepth(route, 0);
 }
 
 static UIViewController *PFActiveTopViewController(void) {
@@ -375,7 +439,7 @@ static UIViewController *PFActiveTopViewController(void) {
             if (scene.activationState != UISceneActivationStateForegroundActive &&
                 scene.activationState != UISceneActivationStateForegroundInactive) continue;
             for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-                if (window.isKeyWindow && !window.hidden) {
+                if (window.isKeyWindow && !window.hidden && window.alpha > 0.01) {
                     keyWindow = window;
                     break;
                 }
@@ -388,7 +452,7 @@ static UIViewController *PFActiveTopViewController(void) {
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     if (!keyWindow) {
         for (UIWindow *window in application.windows) {
-            if (window.isKeyWindow && !window.hidden) {
+            if (window.isKeyWindow && !window.hidden && window.alpha > 0.01) {
                 keyWindow = window;
                 break;
             }
@@ -421,126 +485,111 @@ static UIViewController *PFActiveTopViewController(void) {
     return controller;
 }
 
-static NSString * const PFNavigatorPushAliasName = @"pfh_original_pushController:withUrl:withNavigator:popBefore:";
+static void PFSettingsRouteOverlayAttempt(NSUInteger remainingAttempts) {
+    UIViewController *target = PFActiveTopViewController();
+    if (target && target.isViewLoaded && target.view.window) {
+        [[PFPluginEntryManager shared] installRouteEntryOverlayOnController:target];
+        return;
+    }
 
-static void PFHandleSettingsRoute(id controllerObject, id urlObject) {
+    if (remainingAttempts == 0) {
+        PFLog(@"Could not attach Settings route overlay: no visible view controller was found.");
+        return;
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        PFSettingsRouteOverlayAttempt(remainingAttempts - 1);
+    });
+}
+
+static void PFHandleSettingsRoute(id urlObject) {
     NSString *route = PFRouteString(urlObject);
     NSString *lowerRoute = route.lowercaseString;
-    // These route names were found in the supplied Runner Mach-O.
     BOOL isSettingsRoute =
         [lowerRoute containsString:@"fleamarket://flutter_settings"] ||
         [lowerRoute containsString:@"flutter_settings"];
 
-    if (!isSettingsRoute) return;
-
-    PFLog(@"Detected Xianyu Settings route from Runner: %@", route);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        UIViewController *target =
-            [controllerObject isKindOfClass:[UIViewController class]]
-                ? (UIViewController *)controllerObject : nil;
-
-        if (!target.navigationController ||
-            target.navigationController.topViewController != target) {
-            UIViewController *visible = PFActiveTopViewController();
-            if (visible) target = visible;
-        }
-
-        if (target) {
-            [[PFPluginEntryManager shared] settingsControllerDidAppear:target];
-            PFLog(@"Settings entry attached to route controller: %@",
-                  NSStringFromClass(target.class));
-        } else {
-            PFLog(@"Settings route detected, but the visible UIViewController was unavailable.");
-        }
-    });
+    if (isSettingsRoute) {
+        PFLog(@"Detected Xianyu Flutter Settings route from FMURLRouter: %@", route);
+        // Flutter may change its page without presenting a new native UIViewController.
+        // A native overlay button works even when the page itself has no UINavigationBar.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            PFSettingsRouteOverlayAttempt(16);
+        });
+    } else if (route.length &&
+               ([lowerRoute containsString:@"fleamarket://"] ||
+                [lowerRoute containsString:@"http://"] ||
+                [lowerRoute containsString:@"https://"])) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[PFPluginEntryManager shared] removeRouteEntryOverlay];
+        });
+    } else {
+        PFLog(@"FMURLRouter URL argument could not be resolved to a route (class=%@).",
+              urlObject ? NSStringFromClass([urlObject class]) : @"(nil)");
+    }
 }
 
-static void PFNavigatorPushControllerVoid(id self,
-                                          SEL command,
-                                          id controller,
-                                          id url,
-                                          id navigator,
-                                          BOOL popBefore) {
-    SEL alias = NSSelectorFromString(PFNavigatorPushAliasName);
-    void (*original)(id, SEL, id, id, id, BOOL) =
-        (void (*)(id, SEL, id, id, id, BOOL))[self methodForSelector:alias];
-    if (original) original(self, alias, controller, url, navigator, popBefore);
-    PFHandleSettingsRoute(controller, url);
-}
+static NSString * const PFFMURLRouterOpenAliasName =
+    @"pfh_original_openURL:withQuery:withParams:";
 
-static id PFNavigatorPushControllerObject(id self,
-                                          SEL command,
-                                          id controller,
-                                          id url,
-                                          id navigator,
-                                          BOOL popBefore) {
-    SEL alias = NSSelectorFromString(PFNavigatorPushAliasName);
-    id (*original)(id, SEL, id, id, id, BOOL) =
-        (id (*)(id, SEL, id, id, id, BOOL))[self methodForSelector:alias];
-    id result = original ? original(self, alias, controller, url, navigator, popBefore) : nil;
-    PFHandleSettingsRoute(controller, url);
+static BOOL PFFMURLRouterOpenURL(id self, SEL command, id url, id query, id params) {
+    SEL alias = NSSelectorFromString(PFFMURLRouterOpenAliasName);
+    BOOL (*original)(id, SEL, id, id, id) =
+        (BOOL (*)(id, SEL, id, id, id))[self methodForSelector:alias];
+    BOOL result = original ? original(self, alias, url, query, params) : NO;
+    PFHandleSettingsRoute(url);
     return result;
 }
 
-static void PFInstallNavigatorRouteHook(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        SEL selector = sel_registerName("pushController:withUrl:withNavigator:popBefore:");
-        SEL alias = NSSelectorFromString(PFNavigatorPushAliasName);
+static BOOL PFInstallFMURLRouterHook(void) {
+    Class routerClass = NSClassFromString(@"FMURLRouter");
+    SEL selector = sel_registerName("openURL:withQuery:withParams:");
+    SEL alias = NSSelectorFromString(PFFMURLRouterOpenAliasName);
+    Method method = routerClass ? class_getInstanceMethod(routerClass, selector) : NULL;
 
-        int classCount = objc_getClassList(NULL, 0);
-        if (classCount <= 0) {
-            PFLog(@"Navigator hook skipped: Objective-C runtime returned no classes.");
-            return;
+    if (!routerClass || !method) {
+        PFLog(@"FMURLRouter route hook unavailable (class=%@ method=%@).",
+              routerClass ? @"found" : @"missing",
+              method ? @"found" : @"missing");
+        return NO;
+    }
+
+    if (method_getNumberOfArguments(method) != 5) {
+        PFLog(@"FMURLRouter openURL hook skipped: unexpected argument count %u.",
+              method_getNumberOfArguments(method));
+        return NO;
+    }
+
+    char *returnType = method_copyReturnType(method);
+    BOOL returnsBoolean = returnType &&
+        (returnType[0] == 'B' || returnType[0] == 'c' || returnType[0] == 'C');
+    free(returnType);
+    if (!returnsBoolean) {
+        PFLog(@"FMURLRouter openURL hook skipped: unexpected return type.");
+        return NO;
+    }
+
+    for (unsigned int index = 2; index <= 4; index++) {
+        char *type = method_copyArgumentType(method, index);
+        BOOL isObject = type && (type[0] == '@' || type[0] == '#');
+        free(type);
+        if (!isObject) {
+            PFLog(@"FMURLRouter openURL hook skipped: argument %u is not an object.", index);
+            return NO;
         }
+    }
 
-        __unsafe_unretained Class *classes = (__unsafe_unretained Class *)calloc((size_t)classCount, sizeof(Class));
-        if (!classes) {
-            PFLog(@"Navigator hook skipped: could not allocate class list.");
-            return;
-        }
+    if (!class_addMethod(routerClass, alias, method_getImplementation(method),
+                         method_getTypeEncoding(method))) {
+        PFLog(@"FMURLRouter openURL hook skipped: alias already exists.");
+        return NO;
+    }
 
-        int actualCount = objc_getClassList(classes, classCount);
-        NSUInteger installed = 0;
-        for (int index = 0; index < actualCount; index++) {
-            Class cls = classes[index];
-            if (!PFClassDefinesSelector(cls, selector)) continue;
-
-            Method method = class_getInstanceMethod(cls, selector);
-            char returnKind = PFNavigatorPushReturnKind(method);
-            if (!returnKind) {
-                PFLog(@"Navigator route hook skipped for %@: unsupported encoding %@",
-                      NSStringFromClass(cls),
-                      method ? [NSString stringWithUTF8String:method_getTypeEncoding(method)] : @"(missing)");
-                continue;
-            }
-
-            IMP previous = method_getImplementation(method);
-            const char *types = method_getTypeEncoding(method);
-            if (!class_addMethod(cls, alias, previous, types)) {
-                PFLog(@"Navigator route hook skipped for %@: original-method alias already exists.",
-                      NSStringFromClass(cls));
-                continue;
-            }
-
-            IMP replacement = returnKind == 'v'
-                ? (IMP)PFNavigatorPushControllerVoid
-                : (IMP)PFNavigatorPushControllerObject;
-            method_setImplementation(method, replacement);
-            installed++;
-            PFLog(@"Installed route-aware Settings hook on %@ (%@ return).",
-                  NSStringFromClass(cls),
-                  returnKind == 'v' ? @"void" : @"object");
-        }
-
-        free(classes);
-        if (installed == 0) {
-            PFLog(@"No compatible native route-push method found; Settings title/class fallback remains enabled.");
-        } else {
-            PFLog(@"Route-aware Settings hooks installed: %lu", (unsigned long)installed);
-        }
-    });
+    method_setImplementation(method, (IMP)PFFMURLRouterOpenURL);
+    PFLog(@"Installed route hook on confirmed Runner class FMURLRouter openURL:withQuery:withParams:.");
+    return YES;
 }
 
 static void PFInstallSettingsHook(void) {
@@ -548,7 +597,7 @@ static void PFInstallSettingsHook(void) {
     dispatch_once(&onceToken, ^{
         Class cls = UIViewController.class;
         SEL selector = @selector(viewDidAppear:);
-        SEL alias = sel_registerName("pfh_original_viewDidAppear:");
+        SEL alias = NSSelectorFromString(PFSettingsOriginalViewDidAppear);
         Method method = class_getInstanceMethod(cls, selector);
 
         if (method && !class_getInstanceMethod(cls, alias)) {
@@ -556,12 +605,15 @@ static void PFInstallSettingsHook(void) {
                             method_getImplementation(method),
                             method_getTypeEncoding(method));
             method_setImplementation(method, (IMP)PFSettingsViewDidAppear);
-            PFLog(@"Generic Settings title/class fallback hook installed.");
+            PFLog(@"Generic native Settings title/class fallback hook installed.");
         } else if (!method) {
             PFLog(@"UIViewController viewDidAppear: not found");
         }
 
-        PFInstallNavigatorRouteHook();
+        BOOL routeHookInstalled = PFInstallFMURLRouterHook();
+        if (!routeHookInstalled) {
+            PFLog(@"The exact FMURLRouter hook was not installed; only native title/class fallback remains.");
+        }
     });
 }
 
