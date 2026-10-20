@@ -8,7 +8,7 @@ This repository is an initial, reconnaissance-only project intended to identify 
 
 - Logs the dylib load marker, target bundle identifier, app version, and build.
 - Adds a floating **“猪手” plugin entry** to the host app window.
-- Opens a control panel with a manual runtime scan, session-only logging toggles, runtime status, and diagnostic log export.
+- Opens a control panel with a registered native Action list and session-only reconnaissance settings.
 - Enumerates Objective-C runtime classes matching a configurable regular expression.
 - Optionally lists instance methods and class methods for matched classes.
 - Filters method names to reduce log volume.
@@ -27,7 +27,17 @@ Available controls:
 
 The logging toggles currently affect the running process only; they are not persisted after the app exits. The entry is installed when a foreground app window becomes available. If no active window appears, installation is retried for a short period and again when the app becomes active.
 
-The current panel contains only controls implemented in this reconnaissance build. It does not claim that the Android action engine has been ported.
+## Native Action registry
+
+The menu is populated by PFRegisteredActions() in PFAction.m. Current Actions:
+
+- 打开闲鱼鱼币任务页 — opens the Xianyu deep link found in the supplied binary; the user continues manually inside the app.
+- 运行 Runtime 侦察 — performs a filtered Objective-C runtime scan on a background queue.
+- 复制诊断日志 — copies the newest diagnostics to the clipboard.
+- 清空诊断日志 — clears this plugin's temporary log file.
+- 记录运行状态 — writes the app bundle and version to the diagnostic log.
+
+The Android task engine has not been ported wholesale. This native Action layer does not perform protocol-request substitution, silent task triggering, or automated reward claiming.
 
 ## Target and initial findings
 
@@ -55,10 +65,14 @@ These are static-analysis leads, not proof that every class is registered in the
 From the repository root on a machine configured with Theos:
 
 ```sh
-make clean package FINALPACKAGE=1
+make clean && make
 ```
 
-The package output is written to `.theos/packages/`. This code has not yet been confirmed as successfully compiled or tested on-device.
+The dylib is written under `.theos/obj/`. This code has not yet been confirmed as successfully compiled or tested on-device.
+
+## CI build artifact
+
+Every push to main starts the **Build iOS dylib** GitHub Actions workflow. Open the [Actions page](https://github.com/FadedRK/PiggyHandFish-iOS/actions), select a successful run, and download the generated artifact. A failed run does not produce a usable dylib.
 
 ## Reconnaissance workflow
 
