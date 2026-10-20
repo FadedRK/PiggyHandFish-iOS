@@ -7,8 +7,8 @@ This repository is an initial, reconnaissance-only project intended to identify 
 ## Current features
 
 - Logs the dylib load marker, target bundle identifier, app version, and build.
-- Adds a floating **“猪手” plugin entry** to the host app window.
-- Opens a control panel with a registered native Action list and session-only reconnaissance settings.
+- Adds a **“猪手” entry to the host app’s Settings page** when its native view controller can be identified.
+- Opens a native settings panel with registered Actions and session-only reconnaissance options.
 - Enumerates Objective-C runtime classes matching a configurable regular expression.
 - Optionally lists instance methods and class methods for matched classes.
 - Filters method names to reduce log volume.
@@ -16,7 +16,7 @@ This repository is an initial, reconnaissance-only project intended to identify 
 
 ## Plugin entry
 
-After injection, look for the floating orange **猪手** button near the lower-right side of the app. Tap it to open the panel.
+After injection, open the app’s **Settings** page. When the Settings view is implemented as a detectable native view controller, a **猪手** button is added to the navigation bar. Tap it to open PiggyHandFish settings. The entry is installed by a `UIViewController viewDidAppear:` hook, following the approach used in ZolaCN. If the app’s Settings route is rendered entirely inside a single Flutter view controller without a native Settings title/class, this detection may need an app-specific route hook.
 
 Available controls:
 
@@ -25,7 +25,7 @@ Available controls:
 - **查看运行状态** — view bundle/version, filters, toggles, and log path.
 - **复制诊断日志 / 复制日志文件路径** — copy diagnostic text or the file path to the clipboard.
 
-The logging toggles currently affect the running process only; they are not persisted after the app exits. The entry is installed when a foreground app window becomes available. If no active window appears, installation is retried for a short period and again when the app becomes active.
+The logging toggles currently affect the running process only; they are not persisted after the app exits. The Settings entry is added when a native view controller with a Settings-related class name or title appears.
 
 ## Native Action registry
 
@@ -77,8 +77,8 @@ Every push to main starts the **Build iOS dylib** GitHub Actions workflow. It us
 ## Reconnaissance workflow
 
 1. Build the dylib and inject it into the app you are authorized to inspect.
-2. Confirm that the `PiggyHandFish` load marker appears in the system log.
-3. Tap the floating entry and use **立即运行侦察** to repeat a scan.
+2. Confirm that `[PiggyHandFish] dylib constructor invoked` and `PFStart entered` appear in the system log.
+3. Open the app’s Settings page, tap **猪手**, then use **运行 Runtime 侦察** to repeat a scan.
 4. Enable only the log categories needed for the next scan.
 5. Export the diagnostic log from the panel and review the results.
 6. Narrow the class and method expressions based on the actual runtime output.
@@ -105,8 +105,8 @@ On iOS this usually resolves inside the target app's temporary container. System
 
 ## Project structure
 
-- `Tweak.m` — dylib entry point
-- `PFPluginEntry.h/.m` — floating plugin button and control panel
+- `PFMain.m` — dylib entry point
+- `PFPluginEntry.h/.m` — native Settings-page entry and plugin settings panel
 - `PFConfig.h/.m` — reconnaissance options
 - `PFLogger.h/.m` — system and file logging
 - `PFScout.h/.m` — runtime class and method enumeration
