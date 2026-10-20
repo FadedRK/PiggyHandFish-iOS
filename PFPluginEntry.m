@@ -495,7 +495,7 @@ static void PFInstallNavigatorRouteHook(void) {
             return;
         }
 
-        Class *classes = calloc((size_t)classCount, sizeof(Class));
+        __unsafe_unretained Class *classes = (__unsafe_unretained Class *)calloc((size_t)classCount, sizeof(Class));
         if (!classes) {
             PFLog(@"Navigator hook skipped: could not allocate class list.");
             return;
