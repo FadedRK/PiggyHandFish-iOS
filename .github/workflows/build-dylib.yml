@@ -9,36 +9,61 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: piggyhandfish-dylib
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build PiggyHandFish dylib
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
-      - name: Checkout source
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare Theos toolchain and iOS SDK
-        uses: Randomblock1/theos-action@v1
+      - name: Setup Theos (same toolchain family as ZolaCN)
+        uses: waruhachi/theos-action@v2.4.6
+        with:
+          theos-src: waruhachi/theos
+          theos-branch: main
+          sdks-src: waruhachi/sdks
+          sdks-branch: main
 
-      - name: Compile dylib
+      - name: Build dylib
         shell: bash
         run: |
           set -euo pipefail
           make clean
           make
-          mkdir -p artifacts
-          find .theos -type f -name '*.dylib' -exec cp -v '{}' artifacts/ \;
-          if ! find artifacts -type f -name '*.dylib' -print -quit | grep -q .; then
-            echo "No dylib was produced by the Theos build." >&2
-            find .theos -maxdepth 6 -type f -print || true
+          mkdir -p dist
+
+          ARM64="$(find .theos/obj -type f -path '*/arm64/PiggyHandFish.dylib' -print -quit)"
+          ARM64E="$(find .theos/obj -type f -path '*/arm64e/PiggyHandFish.dylib' -print -quit)"
+
+          if [[ -z "$ARM64" ]]; then
+            echo "Theos did not produce the arm64 dylib." >&2
+            find .theos/obj -type f -name '*.dylib' -print || true
             exit 1
           fi
-          ls -lh artifacts
+
+          if [[ -n "$ARM64E" ]]; then
+            lipo -create "$ARM64" "$ARM64E" -output dist/PiggyHandFish.dylib
+          else
+            cp "$ARM64" dist/PiggyHandFish.dylib
+          fi
+
+          file dist/PiggyHandFish.dylib
+          lipo -info dist/PiggyHandFish.dylib
+          test -s dist/PiggyHandFish.dylib
+          shasum -a 256 dist/PiggyHandFish.dylib | tee dist/SHA256SUMS.txt
+          ls -lh dist
 
       - name: Upload dylib artifact
         uses: actions/upload-artifact@v4
         with:
           name: PiggyHandFish-iOS-${{ github.sha }}
-          path: artifacts/*.dylib
+          path: |
+            dist/PiggyHandFish.dylib
+            dist/SHA256SUMS.txt
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
