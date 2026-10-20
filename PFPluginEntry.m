@@ -3,6 +3,7 @@
 #import "PFConfig.h"
 #import "PFLogger.h"
 #import "PFScout.h"
+#import "PFAction.h"
 
 static NSString *PFPluginLogPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"piggyhandfish.log"];
@@ -232,12 +233,19 @@ static NSString *PFPluginLogPath(void) {
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"PiggyHandFish"
                                                                    message:@"iOS 运行时侦察工具"
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"立即运行侦察" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        PFLog(@"Manual reconnaissance started from plugin entry.");
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            PFStartScout();
-        });
-    }]];
+    // Build executable menu items from the Action registry.
+    __weak typeof(self) weakSelf = self;
+    for (PFAction *registeredAction in PFRegisteredActions()) {
+        PFAction *action = registeredAction;
+        NSString *buttonTitle = action.title;
+        [sheet addAction:[UIAlertAction actionWithTitle:buttonTitle
+                                                 style:UIAlertActionStyleDefault
+                                               handler:^(__unused UIAlertAction *alertAction) {
+            PFPerformAction(action.identifier, ^(BOOL success, NSString *message) {
+                [weakSelf showMessage:message title:(success ? buttonTitle : @"Action 执行失败")];
+            });
+        }]];
+    }
 
     PFConfig *config = PFGetConfig();
     __weak typeof(self) weakSelf = self;
@@ -253,9 +261,6 @@ static NSString *PFPluginLogPath(void) {
 
     [sheet addAction:[UIAlertAction actionWithTitle:@"查看运行状态" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
         [weakSelf showMessage:[weakSelf statusMessage] title:@"运行状态"];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"复制诊断日志" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        [weakSelf copyLogToPasteboard];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"复制日志文件路径" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
         UIPasteboard.generalPasteboard.string = PFPluginLogPath();
