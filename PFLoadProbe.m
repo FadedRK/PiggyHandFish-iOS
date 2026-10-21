@@ -5,6 +5,15 @@ static BOOL gProbeAlertPresented = NO;
 static BOOL gProbeRetryScheduled = NO;
 static NSUInteger gProbeRetryCount = 0;
 static id gProbeActiveObserver = nil;
+static NSObject *gProbeLogLock = nil;
+
+static NSObject *PFProbeLock(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        gProbeLogLock = [NSObject new];
+    });
+    return gProbeLogLock;
+}
 
 static NSString *PFProbeLogPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"piggyhandfish-load-probe.log"];
@@ -16,7 +25,7 @@ static void PFProbeLog(NSString *message) {
 
     NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
     if (!data) return;
-    @synchronized ([PFProbeLogPath() copy]) {
+    @synchronized (PFProbeLock()) {
         NSFileManager *fm = NSFileManager.defaultManager;
         NSString *path = PFProbeLogPath();
         if (![fm fileExistsAtPath:path]) [fm createFileAtPath:path contents:nil attributes:nil];
