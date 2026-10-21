@@ -14,7 +14,7 @@ static NSString *PFBundleValue(NSString *key) {
 static void PFStart(void) {
     NSLog(@"[PiggyHandFish] PFStart entered");
     PFLog(@"=== PiggyHandFish iOS reconnaissance loaded ===");
-    PFLog(@"Bundle identifier: %@", [[NSBundle mainBundle bundleIdentifier] ?: @"(unknown)"]);
+    PFLog(@"Bundle identifier: %@", [NSBundle mainBundle].bundleIdentifier ?: @"(unknown)");
     PFLog(@"App version: %@", PFBundleValue(@"CFBundleShortVersionString"));
     PFLog(@"Build: %@", PFBundleValue(@"CFBundleVersion"));
 
