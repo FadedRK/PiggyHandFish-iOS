@@ -182,23 +182,15 @@ static BOOL PFIsApiRequestObject(id object) {
     return apiRequestClass && [object isKindOfClass:apiRequestClass];
 }
 
-static BOOL PFIsApiRequestObject(id object) {
-    if (!object) return NO;
-    Class apiRequestClass = NSClassFromString(@"ApiRequest");
-    return apiRequestClass && [object isKindOfClass:apiRequestClass];
-}
-
 static id PFHookedFMRequestApiName(id self, SEL _cmd) {
     id result = PFOriginalFMRequestApiName ? PFOriginalFMRequestApiName(self, _cmd) : nil;
-    PFLog(@"MTOP_OBSERVED_FM_TABLE_API class=%@ api=%@",
-          NSStringFromClass([self class]), result ?: @"(nil)");
+    PFLog(@"MTOP_EVENT stage=fm_table_api class=%@ api=%@", NSStringFromClass([self class]), PFSafeIdentifier(result));
     return result;
 }
 
 static id PFHookedFMRequestApiParameter(id self, SEL _cmd, BOOL isPrefetch) {
     id result = PFOriginalFMRequestApiParameter ? PFOriginalFMRequestApiParameter(self, _cmd, isPrefetch) : nil;
-    PFLog(@"MTOP_OBSERVED_FM_TABLE_PARAM class=%@ prefetch=%d shape=%@",
-          NSStringFromClass([self class]), isPrefetch, PFSafeShape(result));
+    PFLog(@"MTOP_EVENT stage=fm_table_parameters class=%@ prefetch=%d %@", NSStringFromClass([self class]), isPrefetch, PFResponseSummary(result));
     return result;
 }
 
@@ -236,28 +228,6 @@ static void PFInstallFMTablePageMtopHooks(void) {
     gFMTablePageMtopHooksInstalled = YES;
     PFLog(@"MTOP_FM_TABLE_HOOK_INSTALLED class=%@ selectors=requestApiName,requestApiParameter:,_handleResponseResultWithSuccess:data:error:mtopRequestModel:refresh:atLaunch:",
           NSStringFromClass(cls));
-}
-
-static id PFHookedFMRequestApiName(id self, SEL _cmd) {
-    id result = PFOriginalFMRequestApiName ? PFOriginalFMRequestApiName(self, _cmd) : nil;
-    PFLog(@"MTOP_EVENT stage=fm_table_api class=%@ api=%@", NSStringFromClass([self class]), PFSafeIdentifier(result));
-    return result;
-}
-
-static id PFHookedFMRequestApiParameter(id self, SEL _cmd, BOOL isPrefetch) {
-    id result = PFOriginalFMRequestApiParameter ? PFOriginalFMRequestApiParameter(self, _cmd, isPrefetch) : nil;
-    PFLog(@"MTOP_EVENT stage=fm_table_parameters class=%@ prefetch=%d %@", NSStringFromClass([self class]), isPrefetch, PFResponseSummary(result));
-    return result;
-}
-
-static void PFHookedFMHandleResponse(id self, SEL _cmd, BOOL success, id data, id error,
-                                     id requestModel, BOOL refresh, BOOL atLaunch) {
-    PFLog(@"MTOP_EVENT stage=fm_table_response class=%@ success=%d response={%@} error={%@} requestClass=%@ request=%p refresh=%d atLaunch=%d",
-          NSStringFromClass([self class]), success, PFResponseSummary(data), PFErrorSummary(error),
-          PFObjectClassName(requestModel), requestModel, refresh, atLaunch);
-    if (PFOriginalFMHandleResponse) {
-        PFOriginalFMHandleResponse(self, _cmd, success, data, error, requestModel, refresh, atLaunch);
-    }
 }
 
 static id PFHookedMtopRequestInit(id self, SEL _cmd, id api, id version) {
@@ -370,7 +340,7 @@ static void PFHookedMtopDelegateDidLoadCache(id self, SEL _cmd, id didLoadCache,
     if (PFOriginalMtopDelegateDidLoadCache) PFOriginalMtopDelegateDidLoadCache(self, _cmd, didLoadCache, responseHeader, body);
 }
 
-static BOOL PFReplaceMethod(Class cls, SEL selector, IMP replacement, IMP *originalOut) {static BOOL PFReplaceMethod(Class cls, SEL selector, IMP replacement, IMP *originalOut) {
+static BOOL PFReplaceMethod(Class cls, SEL selector, IMP replacement, IMP *originalOut) {
     if (!cls || !selector || !replacement || !originalOut) return NO;
     Method method = class_getInstanceMethod(cls, selector);
     if (!method) return NO;
@@ -454,7 +424,7 @@ static void PFInstallGenericMtopObservationHooks(void) {
     }
 }
 
-static BOOL PFRelevantClassName(NSString *name) {static BOOL PFRelevantClassName(NSString *name) {
+static BOOL PFRelevantClassName(NSString *name) {
     NSString *n = name.lowercaseString;
     return [n containsString:@"mtop"] ||
            [n containsString:@"xmodule"] ||
