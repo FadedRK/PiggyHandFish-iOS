@@ -5,7 +5,6 @@
 #import <stdlib.h>
 #import <stdarg.h>
 
-static NSString * const PFCaptureButtonTagKey = @"PiggyHandFishCaptureButton";
 static NSInteger const PFCaptureButtonTag = 0x50464331;
 
 static IMP gRouterOpen4Original = NULL;
@@ -30,6 +29,9 @@ static UIButton *gPFCaptureButton;
 static NSUInteger gPFCaptureRetryCount = 0;
 static BOOL gPFCaptureInventoryWritten = NO;
 static BOOL gPFCaptureRetryScheduled = NO;
+
+@class PFCaptureButtonTarget;
+static PFCaptureButtonTarget *PFCaptureTarget(void);
 
 static NSObject *PFCaptureLock(void) {
     static dispatch_once_t onceToken;
@@ -329,6 +331,11 @@ static BOOL PFCaptureInstallHook(Class cls,
         return YES;
     }
 }
+
+static BOOL PFCaptureRouterOpenURLFourBool(id self, SEL cmd, id url, id query, id params, id uniqueID);
+static id PFCaptureRouterOpenURLFourObject(id self, SEL cmd, id url, id query, id params, id uniqueID);
+static BOOL PFCaptureSafeOpenURLFourBool(id self, SEL cmd, id url, id query, id params, id uniqueID);
+static id PFCaptureSafeOpenURLFourObject(id self, SEL cmd, id url, id query, id params, id uniqueID);
 
 static BOOL PFCaptureInstallRouterFourArgumentHook(Class cls,
                                                     SEL selector,
@@ -682,7 +689,7 @@ static void PFCaptureInstallOverlay(void) {
     button.layer.shadowRadius = 4.0;
     button.layer.shadowOffset = CGSizeMake(0, 2);
     button.layer.zPosition = 1000000.0;
-    [button addTarget:NSClassFromString(@"PFCaptureButtonTarget")
+    [button addTarget:PFCaptureTarget()
                action:@selector(pfcaptureButtonTapped:)
      forControlEvents:UIControlEventTouchUpInside];
 
