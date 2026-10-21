@@ -316,10 +316,10 @@ static void PFHookedMtopBridgeSend(id self, SEL _cmd, id request, id callback, i
     if (PFOriginalMtopBridgeSend) PFOriginalMtopBridgeSend(self, _cmd, request, callback, ext);
 }
 
-static void PFHookedMtopBridgePending(id self, SEL _cmd, id request, id delegate, id extra) {
-    PFLog(@"MTOP_EVENT stage=bridge_pending bridge=%p bridgeClass=%@ request=%p requestClass=%@ delegate=%p delegateClass=%@ extraShape=%@",
-          self, PFObjectClassName(self), request, PFObjectClassName(request), delegate, PFObjectClassName(delegate), PFSafeShape(extra));
-    if (PFOriginalMtopBridgePending) PFOriginalMtopBridgePending(self, _cmd, request, delegate, extra);
+static void PFHookedMtopBridgePending(id self, SEL _cmd, id pending, id request, id delegate) {
+    PFLog(@"MTOP_EVENT stage=bridge_pending bridge=%p bridgeClass=%@ pendingShape=%@ request=%p requestClass=%@ delegate=%p delegateClass=%@",
+          self, PFObjectClassName(self), PFSafeShape(pending), request, PFObjectClassName(request), delegate, PFObjectClassName(delegate));
+    if (PFOriginalMtopBridgePending) PFOriginalMtopBridgePending(self, _cmd, pending, request, delegate);
 }
 
 static void PFHookedMtopDelegateSuccess(id self, SEL _cmd, id response) {
