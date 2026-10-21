@@ -16,6 +16,12 @@ static IMP gRouterCallHandlerOriginal = NULL;
 static IMP gRouterOpenViewControllerOriginal = NULL;
 static IMP gRouterCreateRouterObjectOriginal = NULL;
 static IMP gRouterPreProcessURLOriginal = NULL;
+static IMP gRouterUtilOpenUrlOriginal = NULL;
+static IMP gFlutterRouterPushRouteOriginal = NULL;
+static IMP gFlutterRouterPopRouteOriginal = NULL;
+static IMP gFlutterRouterRemoveRouteOriginal = NULL;
+static IMP gNavigationPushOriginal = NULL;
+static IMP gViewControllerPresentOriginal = NULL;
 static IMP gUIApplicationOpenURLOriginal = NULL;
 static IMP gUIApplicationOpenURLLegacyOriginal = NULL;
 static IMP gMethodChannelInitOriginal = NULL;
@@ -881,6 +887,70 @@ static void PFCaptureWriteRuntimeInventory(void) {
     free(classes);
 }
 
+
+static void PFCaptureRouterUtilOpenUrl(id self, SEL cmd, id url) {
+    PFCaptureLogRouteEvent(@"+[IFMatrix.RouterUtil openUrl:]", url);
+    if (gRouterUtilOpenUrlOriginal) {
+        ((void (*)(id, SEL, id))gRouterUtilOpenUrlOriginal)(self, cmd, url);
+    }
+}
+
+static void PFCaptureFlutterRouterPushRoute(id self, SEL cmd, id route, id completion) {
+    PFCaptureLogRouteEvent(@"-[FBFlutterRouterApi pushRoute:completion:]", route);
+    if (gFlutterRouterPushRouteOriginal) {
+        ((void (*)(id, SEL, id, id))gFlutterRouterPushRouteOriginal)(self, cmd, route, completion);
+    }
+}
+
+static void PFCaptureFlutterRouterPopRoute(id self, SEL cmd, id route, id completion) {
+    PFCaptureLogRouteEvent(@"-[FBFlutterRouterApi popRoute:completion:]", route);
+    if (gFlutterRouterPopRouteOriginal) {
+        ((void (*)(id, SEL, id, id))gFlutterRouterPopRouteOriginal)(self, cmd, route, completion);
+    }
+}
+
+static void PFCaptureFlutterRouterRemoveRoute(id self, SEL cmd, id route, id completion) {
+    PFCaptureLogRouteEvent(@"-[FBFlutterRouterApi removeRoute:completion:]", route);
+    if (gFlutterRouterRemoveRouteOriginal) {
+        ((void (*)(id, SEL, id, id))gFlutterRouterRemoveRouteOriginal)(self, cmd, route, completion);
+    }
+}
+
+static BOOL PFCaptureInterestingController(UIViewController *controller) {
+    if (!controller) return NO;
+    NSString *name = NSStringFromClass(controller.class).lowercaseString;
+    return [name containsString:@"setting"] ||
+           [name containsString:@"flutter"] ||
+           [name containsString:@"xflutter"] ||
+           [name containsString:@"webview"] ||
+           [name containsString:@"router"] ||
+           [name containsString:@"profile"];
+}
+
+static void PFCaptureNavigationPush(id self, SEL cmd, UIViewController *viewController, BOOL animated) {
+    if (PFCaptureInterestingController(viewController)) {
+        PFCaptureLog(@"NATIVE_NAV_PUSH controller=%@ title=%@",
+                     NSStringFromClass(viewController.class),
+                     viewController.title ?: @"(no title)");
+    }
+    if (gNavigationPushOriginal) {
+        ((void (*)(id, SEL, id, BOOL))gNavigationPushOriginal)(self, cmd, viewController, animated);
+    }
+}
+
+static void PFCaptureViewControllerPresent(id self, SEL cmd, UIViewController *viewController,
+                                           BOOL animated, id completion) {
+    if (PFCaptureInterestingController(viewController)) {
+        PFCaptureLog(@"NATIVE_PRESENT controller=%@ title=%@",
+                     NSStringFromClass(viewController.class),
+                     viewController.title ?: @"(no title)");
+    }
+    if (gViewControllerPresentOriginal) {
+        ((void (*)(id, SEL, id, BOOL, id))gViewControllerPresentOriginal)
+            (self, cmd, viewController, animated, completion);
+    }
+}
+
 static void PFCaptureInstallHooks(void) {
     Class router = NSClassFromString(@"FMURLRouter");
     if (router) {
@@ -954,6 +1024,57 @@ static void PFCaptureInstallHooks(void) {
             PFCaptureInstallHook(router, preProcessSelector, NO, (IMP)PFCaptureRouterPreProcessURL,
                                  &gRouterPreProcessURLOriginal, 3, 0);
         }
+    }
+
+    // The runtime inventory showed this high-level URL entry on the tested build.
+    Class routerUtil = NSClassFromString(@"IFMatrix.RouterUtil");
+    SEL utilOpenSelector = sel_registerName("openUrl:");
+    Method utilOpenMethod = routerUtil ? class_getClassMethod(routerUtil, utilOpenSelector) : NULL;
+    if (utilOpenMethod && method_getNumberOfArguments(utilOpenMethod) == 3 &&
+        PFCaptureIsVoidMethod(utilOpenMethod)) {
+        PFCaptureInstallHook(routerUtil, utilOpenSelector, YES,
+                             (IMP)PFCaptureRouterUtilOpenUrl,
+                             &gRouterUtilOpenUrlOriginal, 3, 'v');
+    }
+
+    // The actual app exposes these native-to-Flutter router methods in FBFlutterRouterApi.
+    Class flutterRouterAPI = NSClassFromString(@"FBFlutterRouterApi");
+    if (flutterRouterAPI) {
+        struct {
+            SEL selector;
+            IMP replacement;
+            IMP *original;
+        } routeHooks[] = {
+            { sel_registerName("pushRoute:completion:"), (IMP)PFCaptureFlutterRouterPushRoute, &gFlutterRouterPushRouteOriginal },
+            { sel_registerName("popRoute:completion:"), (IMP)PFCaptureFlutterRouterPopRoute, &gFlutterRouterPopRouteOriginal },
+            { sel_registerName("removeRoute:completion:"), (IMP)PFCaptureFlutterRouterRemoveRoute, &gFlutterRouterRemoveRouteOriginal }
+        };
+        for (NSUInteger i = 0; i < sizeof(routeHooks) / sizeof(routeHooks[0]); i++) {
+            Method method = class_getInstanceMethod(flutterRouterAPI, routeHooks[i].selector);
+            if (method && method_getNumberOfArguments(method) == 4 &&
+                PFCaptureIsVoidMethod(method)) {
+                PFCaptureInstallHook(flutterRouterAPI, routeHooks[i].selector, NO,
+                                     routeHooks[i].replacement, routeHooks[i].original, 4, 'v');
+            }
+        }
+    }
+
+    Class navigationClass = UINavigationController.class;
+    SEL pushSelector = sel_registerName("pushViewController:animated:");
+    Method pushMethod = class_getInstanceMethod(navigationClass, pushSelector);
+    if (pushMethod && method_getNumberOfArguments(pushMethod) == 4 &&
+        PFCaptureIsVoidMethod(pushMethod)) {
+        PFCaptureInstallHook(navigationClass, pushSelector, NO, (IMP)PFCaptureNavigationPush,
+                             &gNavigationPushOriginal, 4, 'v');
+    }
+
+    Class viewControllerClass = UIViewController.class;
+    SEL presentSelector = sel_registerName("presentViewController:animated:completion:");
+    Method presentMethod = class_getInstanceMethod(viewControllerClass, presentSelector);
+    if (presentMethod && method_getNumberOfArguments(presentMethod) == 5 &&
+        PFCaptureIsVoidMethod(presentMethod)) {
+        PFCaptureInstallHook(viewControllerClass, presentSelector, NO, (IMP)PFCaptureViewControllerPresent,
+                             &gViewControllerPresentOriginal, 5, 'v');
     }
 
     Class appClass = UIApplication.class;
