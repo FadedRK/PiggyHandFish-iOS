@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build PiggyHandFish dylib
+    name: Build PiggyHandFish capture dylib
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -47,23 +47,24 @@ jobs:
           fi
 
           if [[ -n "$ARM64E" ]]; then
-            lipo -create "$ARM64" "$ARM64E" -output dist/PiggyHandFish.dylib
+            lipo -create "$ARM64" "$ARM64E" -output dist/PiggyHandFish-Capture.dylib
           else
-            cp "$ARM64" dist/PiggyHandFish.dylib
+            cp "$ARM64" dist/PiggyHandFish-Capture.dylib
           fi
 
-          file dist/PiggyHandFish.dylib
-          lipo -info dist/PiggyHandFish.dylib
-          test -s dist/PiggyHandFish.dylib
-          shasum -a 256 dist/PiggyHandFish.dylib | tee dist/SHA256SUMS.txt
+          install_name_tool -id @rpath/PiggyHandFish-Capture.dylib dist/PiggyHandFish-Capture.dylib
+          file dist/PiggyHandFish-Capture.dylib
+          lipo -info dist/PiggyHandFish-Capture.dylib
+          test -s dist/PiggyHandFish-Capture.dylib
+          shasum -a 256 dist/PiggyHandFish-Capture.dylib | tee dist/SHA256SUMS.txt
           ls -lh dist
 
       - name: Upload dylib artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PiggyHandFish-iOS-${{ github.sha }}
+          name: PiggyHandFish-Capture-${{ github.sha }}
           path: |
-            dist/PiggyHandFish.dylib
+            dist/PiggyHandFish-Capture.dylib
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
