@@ -1,4 +1,4 @@
-name: Build iOS dylib
+name: Build iOS dylibs
 
 on:
   push:
@@ -10,18 +10,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: piggyhandfish-capture-dylib
+  group: piggyhandfish-diagnostic-dylibs
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Build standalone PiggyHandFish capture dylib
+    name: Build capture and load-probe dylibs
     runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Theos (same toolchain family as ZolaCN)
+      - name: Setup Theos
         uses: waruhachi/theos-action@v2.4.6
         with:
           theos-src: waruhachi/theos
@@ -29,7 +29,7 @@ jobs:
           sdks-src: waruhachi/sdks
           sdks-branch: main
 
-      - name: Build standalone capture dylib
+      - name: Build standalone diagnostic dylibs
         shell: bash
         run: |
           set -euo pipefail
@@ -37,34 +37,45 @@ jobs:
           make
           mkdir -p dist
 
-          ARM64="$(find .theos/obj -type f -path '*/arm64/PiggyHandFishCapture.dylib' -print -quit)"
-          ARM64E="$(find .theos/obj -type f -path '*/arm64e/PiggyHandFishCapture.dylib' -print -quit)"
+          build_universal() {
+            local target="$1"
+            local output="$2"
+            local arm64 arm64e
 
-          if [[ -z "$ARM64" ]]; then
-            echo "Theos did not produce the arm64 capture dylib." >&2
-            find .theos/obj -type f -name '*.dylib' -print || true
-            exit 1
-          fi
+            arm64="$(find .theos/obj -type f -path "*/arm64/${target}.dylib" -print -quit)"
+            arm64e="$(find .theos/obj -type f -path "*/arm64e/${target}.dylib" -print -quit)"
 
-          if [[ -n "$ARM64E" ]]; then
-            lipo -create "$ARM64" "$ARM64E" -output dist/PiggyHandFish-Capture.dylib
-          else
-            cp "$ARM64" dist/PiggyHandFish-Capture.dylib
-          fi
+            if [[ -z "$arm64" ]]; then
+              echo "Theos did not produce arm64 ${target}.dylib." >&2
+              find .theos/obj -type f -name '*.dylib' -print || true
+              exit 1
+            fi
 
-          install_name_tool -id @rpath/PiggyHandFish-Capture.dylib dist/PiggyHandFish-Capture.dylib
-          file dist/PiggyHandFish-Capture.dylib
-          lipo -info dist/PiggyHandFish-Capture.dylib
-          test -s dist/PiggyHandFish-Capture.dylib
-          shasum -a 256 dist/PiggyHandFish-Capture.dylib | tee dist/SHA256SUMS.txt
+            if [[ -n "$arm64e" ]]; then
+              lipo -create "$arm64" "$arm64e" -output "$output"
+            else
+              cp "$arm64" "$output"
+            fi
+
+            install_name_tool -id "@rpath/$(basename "$output")" "$output"
+            file "$output"
+            lipo -info "$output"
+            test -s "$output"
+          }
+
+          build_universal PiggyHandFishCapture dist/PiggyHandFish-Capture.dylib
+          build_universal PiggyHandFishProbe dist/PiggyHandFish-LoadProbe.dylib
+
+          shasum -a 256 dist/PiggyHandFish-Capture.dylib dist/PiggyHandFish-LoadProbe.dylib | tee dist/SHA256SUMS.txt
           ls -lh dist
 
-      - name: Upload dylib artifact
+      - name: Upload diagnostic artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: PiggyHandFish-Capture-${{ github.sha }}
+          name: PiggyHandFish-Diagnostics-${{ github.sha }}
           path: |
             dist/PiggyHandFish-Capture.dylib
+            dist/PiggyHandFish-LoadProbe.dylib
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
