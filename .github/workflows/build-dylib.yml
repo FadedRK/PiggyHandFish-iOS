@@ -34,7 +34,7 @@ jobs:
         run: |
           set -euo pipefail
           make clean
-          make PiggyHandFish
+          make
           mkdir -p dist
 
           arm64="$(find .theos/obj -type f -path '*/arm64/PiggyHandFish.dylib' -print -quit)"
