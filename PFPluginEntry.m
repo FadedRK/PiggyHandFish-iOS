@@ -7,7 +7,8 @@
 #import "PFAction.h"
 
 static NSInteger const PFSettingsEntryTag = 0x50464831;
-static NSString * const PFSettingsOriginalViewDidAppear = @"pfh_original_viewDidAppear:";
+static IMP PFOriginalViewDidAppear = NULL;
+static IMP PFOriginalFMURLRouterPreProcessURL = NULL;
 static NSDate *PFSettingsHomeRouteObservedAt = nil;
 static NSString *PFSettingsHomeRouteObservedURL = nil;
 static BOOL PFSettingsEntryRouteActive = NO;
@@ -406,10 +407,9 @@ static void PFConfigureSettingsEntry(UIViewController *controller) {
 }
 
 static void PFSettingsViewDidAppear(UIViewController *self, SEL command, BOOL animated) {
-    SEL originalSelector = sel_registerName("pfh_original_viewDidAppear:");
-    void (*original)(id, SEL, BOOL) =
-        (void (*)(id, SEL, BOOL))[self methodForSelector:originalSelector];
-    if (original) original(self, originalSelector, animated);
+    if (PFOriginalViewDidAppear) {
+        ((void (*)(id, SEL, BOOL))PFOriginalViewDidAppear)(self, command, animated);
+    }
 
     dispatch_async(dispatch_get_main_queue(), ^{
         if (PFSettingsHomeRoutePendingForController(self)) {
@@ -636,14 +636,10 @@ static void PFHandleSettingsRoute(id urlObject) {
     }
 }
 
-static NSString * const PFFMURLRouterPreProcessAliasName =
-    @"pfh_original_preProcessURL:";
-
 static id PFFMURLRouterPreProcessURL(id self, SEL command, id url) {
-    SEL alias = NSSelectorFromString(PFFMURLRouterPreProcessAliasName);
     id (*original)(id, SEL, id) =
-        (id (*)(id, SEL, id))[self methodForSelector:alias];
-    id result = original ? original(self, alias, url) : url;
+        (id (*)(id, SEL, id))PFOriginalFMURLRouterPreProcessURL;
+    id result = original ? original(self, command, url) : url;
     PFHandleSettingsRoute(url);
     return result;
 }
@@ -651,7 +647,6 @@ static id PFFMURLRouterPreProcessURL(id self, SEL command, id url) {
 static BOOL PFInstallFMURLRouterHook(void) {
     Class routerClass = NSClassFromString(@"FMURLRouter");
     SEL selector = sel_registerName("preProcessURL:");
-    SEL alias = NSSelectorFromString(PFFMURLRouterPreProcessAliasName);
     Method method = routerClass ? class_getInstanceMethod(routerClass, selector) : NULL;
 
     if (!routerClass || !method) {
@@ -683,15 +678,17 @@ static BOOL PFInstallFMURLRouterHook(void) {
         return NO;
     }
 
-    if (!class_addMethod(routerClass, alias, method_getImplementation(method),
-                         method_getTypeEncoding(method))) {
-        PFLog(@"FMURLRouter preProcessURL hook skipped: alias already exists.");
-        return NO;
+    IMP currentImplementation = method_getImplementation(method);
+    if (currentImplementation == (IMP)PFFMURLRouterPreProcessURL) {
+        PFLog(@"FMURLRouter preProcessURL hook is already installed in this image.");
+        return YES;
     }
 
-    method_setImplementation(method, (IMP)PFFMURLRouterPreProcessURL);
-    PFLog(@"Installed route hook on actual Runner selector FMURLRouter preProcessURL:.");
-    return YES;
+    PFOriginalFMURLRouterPreProcessURL =
+        method_setImplementation(method, (IMP)PFFMURLRouterPreProcessURL);
+    PFLog(@"Installed chained route hook on Runner selector FMURLRouter preProcessURL: originalIMP=%p",
+          PFOriginalFMURLRouterPreProcessURL);
+    return PFOriginalFMURLRouterPreProcessURL != NULL;
 }
 
 static void PFInstallSettingsHook(void) {
@@ -699,17 +696,17 @@ static void PFInstallSettingsHook(void) {
     dispatch_once(&onceToken, ^{
         Class cls = UIViewController.class;
         SEL selector = @selector(viewDidAppear:);
-        SEL alias = NSSelectorFromString(PFSettingsOriginalViewDidAppear);
         Method method = class_getInstanceMethod(cls, selector);
 
-        if (method && !class_getInstanceMethod(cls, alias)) {
-            class_addMethod(cls, alias,
-                            method_getImplementation(method),
-                            method_getTypeEncoding(method));
-            method_setImplementation(method, (IMP)PFSettingsViewDidAppear);
-            PFLog(@"Generic native Settings title/class fallback hook installed.");
-        } else if (!method) {
+        if (!method) {
             PFLog(@"UIViewController viewDidAppear: not found");
+        } else if (method_getImplementation(method) == (IMP)PFSettingsViewDidAppear) {
+            PFLog(@"UIViewController viewDidAppear hook is already installed in this image.");
+        } else {
+            PFOriginalViewDidAppear =
+                method_setImplementation(method, (IMP)PFSettingsViewDidAppear);
+            PFLog(@"Chained UIViewController viewDidAppear hook installed originalIMP=%p",
+                  PFOriginalViewDidAppear);
         }
 
         BOOL routeHookInstalled = PFInstallFMURLRouterHook();
