@@ -10,12 +10,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: piggyhandfish-dylib
+  group: piggyhandfish-capture-dylib
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Build PiggyHandFish capture dylib
+    name: Build standalone PiggyHandFish capture dylib
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -29,7 +29,7 @@ jobs:
           sdks-src: waruhachi/sdks
           sdks-branch: main
 
-      - name: Build dylib
+      - name: Build standalone capture dylib
         shell: bash
         run: |
           set -euo pipefail
@@ -37,11 +37,11 @@ jobs:
           make
           mkdir -p dist
 
-          ARM64="$(find .theos/obj -type f -path '*/arm64/PiggyHandFish.dylib' -print -quit)"
-          ARM64E="$(find .theos/obj -type f -path '*/arm64e/PiggyHandFish.dylib' -print -quit)"
+          ARM64="$(find .theos/obj -type f -path '*/arm64/PiggyHandFishCapture.dylib' -print -quit)"
+          ARM64E="$(find .theos/obj -type f -path '*/arm64e/PiggyHandFishCapture.dylib' -print -quit)"
 
           if [[ -z "$ARM64" ]]; then
-            echo "Theos did not produce the arm64 dylib." >&2
+            echo "Theos did not produce the arm64 capture dylib." >&2
             find .theos/obj -type f -name '*.dylib' -print || true
             exit 1
           fi
