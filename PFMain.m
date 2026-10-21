@@ -4,6 +4,7 @@
 #import "PFScout.h"
 #import "PFPluginEntry.h"
 #import "PFMtopBridge.h"
+#import "PFTaskModelProbe.h"
 
 static NSString *PFBundleValue(NSString *key) {
     id value = [[NSBundle mainBundle] objectForInfoDictionaryKey:key];
@@ -13,7 +14,7 @@ static NSString *PFBundleValue(NSString *key) {
 static void PFStart(void) {
     NSLog(@"[PiggyHandFish] PFStart entered");
     PFLog(@"=== PiggyHandFish iOS reconnaissance loaded ===");
-    PFLog(@"Bundle identifier: %@", [[NSBundle mainBundle] bundleIdentifier] ?: @"(unknown)");
+    PFLog(@"Bundle identifier: %@", [[NSBundle mainBundle bundleIdentifier] ?: @"(unknown)"]);
     PFLog(@"App version: %@", PFBundleValue(@"CFBundleShortVersionString"));
     PFLog(@"Build: %@", PFBundleValue(@"CFBundleVersion"));
 
@@ -23,6 +24,11 @@ static void PFStart(void) {
     // or changing any request. The resulting signatures identify the bridge
     // needed by the Android-derived task rules.
     PFInstallMtopBridge();
+
+    // Compare the Android task model against classes/selectors actually present
+    // in this iOS process. This probe is read-only: it only enumerates runtime
+    // metadata and never creates, modifies, replays, triggers, or claims requests.
+    PFInstallTaskModelProbe();
 
     if (PFGetConfig().enabled) {
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
