@@ -8,6 +8,10 @@
 
 static NSInteger const PFSettingsEntryTag = 0x50464831;
 static NSString * const PFSettingsOriginalViewDidAppear = @"pfh_original_viewDidAppear:";
+static NSDate *PFSettingsHomeRouteObservedAt = nil;
+static NSString *PFSettingsHomeRouteObservedURL = nil;
+static BOOL PFSettingsHomeRoutePendingForController(UIViewController *controller);
+static void PFSettingsPageRetry(NSUInteger remainingAttempts);
 
 @class PFPluginSettingsController;
 
@@ -390,6 +394,11 @@ static void PFSettingsViewDidAppear(UIViewController *self, SEL command, BOOL an
     if (original) original(self, originalSelector, animated);
 
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (PFSettingsHomeRoutePendingForController(self)) {
+            PFLog(@"Matched settings web controller from recent route; adding native navigation entry.");
+            [[PFPluginEntryManager shared] settingsControllerDidAppear:self];
+            return;
+        }
         PFConfigureSettingsEntry(self);
     });
 }
