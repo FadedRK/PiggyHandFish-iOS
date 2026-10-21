@@ -7,7 +7,7 @@ include $(THEOS)/makefiles/common.mk
 # Keep the normal feature tweak independent from diagnostic builds.
 TWEAK_NAME := PiggyHandFish PiggyHandFishCapture PiggyHandFishProbe
 
-PiggyHandFish_FILES := PFMain.m PFConfig.m PFLogger.m PFScout.m PFPluginEntry.m PFAction.m PFFishTaskRules.m PFMtopBridge.m
+PiggyHandFish_FILES := PFMain.m PFConfig.m PFLogger.m PFScout.m PFPluginEntry.m PFAction.m PFFishTaskRules.m PFMtopBridge.m PFTaskModelProbe.m
 PiggyHandFish_CFLAGS := -fobjc-arc -Wall
 PiggyHandFish_FRAMEWORKS := Foundation UIKit
 PiggyHandFish_LDFLAGS := -install_name @rpath/PiggyHandFish.dylib
