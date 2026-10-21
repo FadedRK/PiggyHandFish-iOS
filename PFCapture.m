@@ -76,11 +76,6 @@ static void PFCaptureLog(NSString *format, ...) {
     }
 }
 
-static NSString *PFCaptureClassName(id object) {
-    return object ? NSStringFromClass(object_getClass(object) == object ? (Class)object : [object class])
-                  : @"(nil)";
-}
-
 static BOOL PFCaptureIsSensitiveKey(NSString *key) {
     NSString *lower = key.lowercaseString;
     NSArray<NSString *> *blocked = @[@"token", @"cookie", @"password", @"passwd",
@@ -283,6 +278,22 @@ static BOOL PFCaptureIsVoidMethod(Method method) {
     return result;
 }
 
+static BOOL PFCaptureClassOwnsSelector(Class cls, SEL selector, BOOL isClassMethod) {
+    Class target = isClassMethod ? object_getClass(cls) : cls;
+    if (!target) return NO;
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(target, &count);
+    BOOL found = NO;
+    for (unsigned int i = 0; i < count; i++) {
+        if (method_getName(methods[i]) == selector) {
+            found = YES;
+            break;
+        }
+    }
+    free(methods);
+    return found;
+}
+
 static NSMutableSet<NSString *> *PFCaptureHookRegistry(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -305,6 +316,9 @@ static BOOL PFCaptureInstallHook(Class cls,
                      NSStringFromSelector(selector)];
     @synchronized (PFCaptureHookRegistry()) {
         if ([PFCaptureHookRegistry() containsObject:key]) return YES;
+        // Only swizzle methods owned by this class. Swizzling an inherited method
+        // through a subclass can replace a shared superclass implementation twice.
+        if (!PFCaptureClassOwnsSelector(cls, selector, isClassMethod)) return NO;
 
         Method method = isClassMethod ? class_getClassMethod(cls, selector)
                                       : class_getInstanceMethod(cls, selector);
