@@ -3,6 +3,7 @@
 #import "PFLogger.h"
 #import "PFScout.h"
 #import "PFPluginEntry.h"
+#import "PFMtopBridge.h"
 
 static NSString *PFBundleValue(NSString *key) {
     id value = [[NSBundle mainBundle] objectForInfoDictionaryKey:key];
@@ -16,8 +17,12 @@ static void PFStart(void) {
     PFLog(@"App version: %@", PFBundleValue(@"CFBundleShortVersionString"));
     PFLog(@"Build: %@", PFBundleValue(@"CFBundleVersion"));
 
-    // Install the floating plugin entry before starting the potentially verbose runtime scan.
     PFInstallPluginEntry();
+
+    // Map the corresponding native iOS MTOP classes/methods without sending
+    // or changing any request. The resulting signatures identify the bridge
+    // needed by the Android-derived task rules.
+    PFInstallMtopBridge();
 
     if (PFGetConfig().enabled) {
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
