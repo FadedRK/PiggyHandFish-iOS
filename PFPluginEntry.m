@@ -10,18 +10,23 @@ static NSInteger const PFSettingsEntryTag = 0x50464831;
 static NSString * const PFSettingsOriginalViewDidAppear = @"pfh_original_viewDidAppear:";
 static NSDate *PFSettingsHomeRouteObservedAt = nil;
 static NSString *PFSettingsHomeRouteObservedURL = nil;
+static BOOL PFSettingsEntryRouteActive = NO;
 static BOOL PFSettingsHomeRoutePendingForController(UIViewController *controller);
 static void PFSettingsPageRetry(NSUInteger remainingAttempts);
+static UIWindow *PFActiveKeyWindow(void);
+static UIViewController *PFActiveTopViewController(void);
 
 @class PFPluginSettingsController;
 
 @interface PFPluginEntryManager : NSObject
 @property (nonatomic, weak) UIViewController *settingsHost;
 @property (nonatomic, weak) UIViewController *routeOverlayHost;
+@property (nonatomic, weak) UIWindow *routeOverlayWindow;
 @property (nonatomic, strong) UIButton *routeEntryButton;
 + (instancetype)shared;
 - (void)settingsControllerDidAppear:(UIViewController *)controller;
 - (void)installRouteEntryOverlayOnController:(UIViewController *)controller;
+- (void)installRouteEntryOverlayOnWindow:(UIWindow *)window controller:(UIViewController *)controller;
 - (void)removeRouteEntryOverlay;
 - (void)openPluginSettings;
 @end
@@ -67,60 +72,71 @@ static void PFSettingsPageRetry(NSUInteger remainingAttempts);
 }
 
 - (void)installRouteEntryOverlayOnController:(UIViewController *)controller {
+    UIWindow *window = controller.viewIfLoaded.window ?: PFActiveKeyWindow();
+    [self installRouteEntryOverlayOnWindow:window controller:controller];
+}
+
+- (void)installRouteEntryOverlayOnWindow:(UIWindow *)window controller:(UIViewController *)controller {
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self installRouteEntryOverlayOnController:controller];
+            [self installRouteEntryOverlayOnWindow:window controller:controller];
         });
         return;
     }
-    if (!controller || !controller.isViewLoaded || !controller.view.window) {
-        PFLog(@"Settings route detected, but the target view is not in a window yet.");
+    if (!window || window.hidden || window.alpha <= 0.01) {
+        PFLog(@"Settings route matched, but no visible key window is ready yet.");
         return;
     }
 
-    self.settingsHost = controller;
-    if (self.routeEntryButton && self.routeOverlayHost == controller &&
-        self.routeEntryButton.superview == controller.view) {
+    if (controller) self.settingsHost = controller;
+    self.routeOverlayHost = controller;
+    self.routeOverlayWindow = window;
+
+    if (self.routeEntryButton && self.routeEntryButton.superview == window) {
         self.routeEntryButton.hidden = NO;
+        [window bringSubviewToFront:self.routeEntryButton];
+        PFLog(@"Settings entry overlay re-used on UIWindow.");
         return;
     }
 
     [self.routeEntryButton removeFromSuperview];
-    self.routeOverlayHost = controller;
 
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     button.translatesAutoresizingMaskIntoConstraints = NO;
     button.accessibilityLabel = @"打开 PiggyHandFish 插件面板";
     button.accessibilityHint = @"打开猪手插件的 Runtime 侦察与诊断设置";
-    button.backgroundColor = [UIColor colorWithRed:0.95 green:0.43 blue:0.16 alpha:0.97];
+    button.backgroundColor = [UIColor colorWithRed:0.95 green:0.32 blue:0.10 alpha:0.98];
     [button setTitle:@"猪手" forState:UIControlStateNormal];
     [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-    button.layer.cornerRadius = 17.0;
+    button.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
+    button.layer.cornerRadius = 19.0;
     button.layer.borderWidth = 1.0;
-    button.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.85].CGColor;
+    button.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.9].CGColor;
     button.layer.shadowColor = UIColor.blackColor.CGColor;
-    button.layer.shadowOpacity = 0.22;
-    button.layer.shadowRadius = 5.0;
+    button.layer.shadowOpacity = 0.28;
+    button.layer.shadowRadius = 6.0;
     button.layer.shadowOffset = CGSizeMake(0, 2);
-    button.layer.zPosition = 9999.0;
+    button.layer.zPosition = 1000000.0;
     button.exclusiveTouch = YES;
     [button addTarget:self action:@selector(openPluginSettings)
      forControlEvents:UIControlEventTouchUpInside];
 
-    [controller.view addSubview:button];
+    [window addSubview:button];
+    [window bringSubviewToFront:button];
     self.routeEntryButton = button;
-    UILayoutGuide *safeArea = controller.view.safeAreaLayoutGuide;
+
+    UILayoutGuide *safeArea = window.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
         [button.trailingAnchor constraintEqualToAnchor:safeArea.trailingAnchor constant:-12.0],
-        [button.topAnchor constraintEqualToAnchor:safeArea.topAnchor constant:8.0],
-        [button.widthAnchor constraintEqualToConstant:56.0],
-        [button.heightAnchor constraintEqualToConstant:34.0]
+        [button.centerYAnchor constraintEqualToAnchor:safeArea.centerYAnchor constant:-8.0],
+        [button.widthAnchor constraintEqualToConstant:64.0],
+        [button.heightAnchor constraintEqualToConstant:38.0]
     ]];
 
-    PFLog(@"Settings route overlay installed on %@ (view=%@).",
-          NSStringFromClass(controller.class),
-          NSStringFromClass(controller.view.class));
+    PFLog(@"SETTINGS_ENTRY_WINDOW_INSTALLED window=%@ controller=%@ route=%@",
+          NSStringFromClass(window.class),
+          controller ? NSStringFromClass(controller.class) : @"(unresolved)",
+          PFSettingsHomeRouteObservedURL ?: @"(route marker unavailable)");
 }
 
 - (void)removeRouteEntryOverlay {
@@ -136,6 +152,7 @@ static void PFSettingsPageRetry(NSUInteger remainingAttempts);
     }
     self.routeEntryButton = nil;
     self.routeOverlayHost = nil;
+    self.routeOverlayWindow = nil;
 }
 
 - (UIViewController *)topViewControllerFrom:(UIViewController *)controller {
@@ -156,7 +173,8 @@ static void PFSettingsPageRetry(NSUInteger remainingAttempts);
 
 - (void)openPluginSettings {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *presenter = [self topViewControllerFrom:self.settingsHost];
+        UIViewController *presenter = PFActiveTopViewController();
+        if (!presenter) presenter = [self topViewControllerFrom:self.settingsHost];
         if (!presenter || presenter.presentedViewController) {
             PFLog(@"Cannot open plugin settings: presenter is unavailable or already presenting.");
             return;
@@ -438,16 +456,18 @@ static NSString *PFRouteString(id route) {
     return PFRouteStringDepth(route, 0);
 }
 
-static UIViewController *PFActiveTopViewController(void) {
-    UIWindow *keyWindow = nil;
+static UIWindow *PFActiveKeyWindow(void) {
     UIApplication *application = UIApplication.sharedApplication;
+    UIWindow *keyWindow = nil;
 
     if (@available(iOS 13.0, *)) {
         for (UIScene *scene in application.connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
             if (scene.activationState != UISceneActivationStateForegroundActive &&
                 scene.activationState != UISceneActivationStateForegroundInactive) continue;
-            for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            for (UIWindow *window in windowScene.windows) {
                 if (window.isKeyWindow && !window.hidden && window.alpha > 0.01) {
                     keyWindow = window;
                     break;
@@ -466,10 +486,23 @@ static UIViewController *PFActiveTopViewController(void) {
                 break;
             }
         }
+        if (!keyWindow) {
+            for (UIWindow *window in application.windows) {
+                if (!window.hidden && window.alpha > 0.01) {
+                    keyWindow = window;
+                    break;
+                }
+            }
+        }
     }
 #pragma clang diagnostic pop
+    return keyWindow;
+}
 
+static UIViewController *PFActiveTopViewController(void) {
+    UIWindow *keyWindow = PFActiveKeyWindow();
     UIViewController *controller = keyWindow.rootViewController;
+
     while (controller) {
         if (controller.presentedViewController) {
             controller = controller.presentedViewController;
@@ -518,15 +551,27 @@ static BOOL PFSettingsHomeRoutePendingForController(UIViewController *controller
 }
 
 static void PFSettingsPageRetry(NSUInteger remainingAttempts) {
+    UIWindow *window = PFActiveKeyWindow();
     UIViewController *target = PFActiveTopViewController();
-    if (target && target.isViewLoaded && target.view.window &&
-        PFSettingsHomeRoutePendingForController(target)) {
-        [[PFPluginEntryManager shared] settingsControllerDidAppear:target];
+
+    if (window) {
+        PFPluginEntryManager *manager = [PFPluginEntryManager shared];
+        [manager installRouteEntryOverlayOnWindow:window controller:target];
+
+        // Retain the ZolaCN-style navigation-bar item as a secondary entry when
+        // the matching native WebView controller is visible. The window button is
+        // intentionally independent of this class check.
+        if (target && PFSettingsHomeRoutePendingForController(target)) {
+            [manager settingsControllerDidAppear:target];
+        } else {
+            PFLog(@"SETTINGS_ENTRY_FALLBACK window attached; activeController=%@",
+                  target ? NSStringFromClass(target.class) : @"(none)");
+        }
         return;
     }
 
     if (remainingAttempts == 0) {
-        PFLog(@"Settings H5 route observed, but no matching FMWebViewController appeared during the retry window.");
+        PFLog(@"SETTINGS_ENTRY_FAILED no active UIWindow after route observation.");
         return;
     }
 
@@ -554,13 +599,29 @@ static void PFHandleSettingsRoute(id urlObject) {
         [lowerRoute containsString:@"/idlefish-f2e/idle-personal-setting/"];
     if (isSettingsHome) {
         @synchronized ([PFPluginEntryManager class]) {
+            PFSettingsEntryRouteActive = YES;
             PFSettingsHomeRouteObservedAt = [NSDate date];
             PFSettingsHomeRouteObservedURL = route;
         }
         PFLog(@"Confirmed Xianyu personal-settings H5 route: %@", route);
-        dispatch_async(dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.65 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
             PFSettingsPageRetry(32);
         });
+    } else if ([lowerRoute containsString:@"fleamarket://personalpage"]) {
+        BOOL shouldRemove = NO;
+        @synchronized ([PFPluginEntryManager class]) {
+            shouldRemove = PFSettingsEntryRouteActive;
+            PFSettingsEntryRouteActive = NO;
+            PFSettingsHomeRouteObservedAt = nil;
+            PFSettingsHomeRouteObservedURL = nil;
+        }
+        if (shouldRemove) {
+            PFLog(@"Leaving personal page; removing settings entry overlay.");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[PFPluginEntryManager shared] removeRouteEntryOverlay];
+            });
+        }
     }
 }
 
