@@ -19,7 +19,11 @@ static NSString *PFProbeLogPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"piggyhandfish-load-probe.log"];
 }
 
-static void PFProbeLog(NSString *message) {
+static void PFProbeLog(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format ?: @"" arguments:args];
+    va_end(args);
     NSString *line = [NSString stringWithFormat:@"%@ [PiggyHandFish-LoadProbe] %@\n", [NSDate date], message ?: @""];
     NSLog(@"%@", [line stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet]);
 
@@ -163,7 +167,7 @@ static void PFProbeStartOnMainThread(void) {
                                                               queue:NSOperationQueue.mainQueue
                                                          usingBlock:^(__unused NSNotification *notification) {
             PFProbeLog(@"APPLICATION_DID_BECOME_ACTIVE");
-            PFProbeRetryCount = 0;
+            gProbeRetryCount = 0;
             PFProbeScheduleRetry();
         }];
     }
