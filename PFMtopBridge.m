@@ -35,6 +35,8 @@ static void (*PFOriginalMtopDelegateSuccess)(id, SEL, id);
 static void (*PFOriginalMtopDelegateFailure)(id, SEL, id);
 static void (*PFOriginalMtopDelegateDidLoadCache)(id, SEL, id, id, id);
 static char PFRequestStartTimeKey;
+static char PFRequestAPIKey;
+static char PFRequestVersionKey;
 
 // Privacy-safe request/response logging: retain field names and value shapes,
 // but never dump arbitrary parameter values, cookies, tokens, signatures, or bodies.
@@ -119,7 +121,7 @@ static BOOL PFSafeCodeString(NSString *value) {
 
 static void PFCollectSafeResultCodes(id object, NSString *prefix, NSUInteger depth, NSMutableArray<NSString *> *output) {
     if (!object || depth > 3 || output.count >= 16) return;
-    NSSet *safeKeys = [NSSet setWithArray:@[@"ret", @"code", @"status", @"success", @"errorcode", @"errcode", @"errno", @"msgcode", @"resultcode"]];
+    NSSet *safeKeys = [NSSet setWithArray:@[@"ret", @"code", @"status", @"success", @"errorcode", @"errcode", @"errno", @"msgcode", @"resultcode", @"state", @"taskstatus", @"taskstate", @"benefitstatus", @"rewardstatus", @"claimed", @"isclaimed", @"completed", @"iscompleted", @"finished", @"isfinished", @"retcode", @"statuscode", @"resultstatus", @"successflag"]];
     if ([object isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dictionary = (NSDictionary *)object;
         for (id rawKey in dictionary) {
@@ -174,6 +176,50 @@ static NSString *PFErrorSummary(id error) {
 static CFTimeInterval PFElapsedSinceRequestInit(id object) {
     NSNumber *start = objc_getAssociatedObject(object, &PFRequestStartTimeKey);
     return start ? MAX(0, CFAbsoluteTimeGetCurrent() - start.doubleValue) * 1000.0 : -1;
+}
+
+// Invoke only object-returning getters, after checking the real runtime method encoding.
+static id PFInvokeObservedObjectGetter(id object, SEL selector) {
+    if (!object || !selector || ![object respondsToSelector:selector]) return nil;
+    Method method = class_getInstanceMethod([object class], selector);
+    if (!method) return nil;
+    char returnType[32] = {0};
+    method_getReturnType(method, returnType, sizeof(returnType));
+    if (returnType[0] != '@') return nil;
+    IMP implementation = method_getImplementation(method);
+    return implementation ? ((id (*)(id, SEL))implementation)(object, selector) : nil;
+}
+
+static NSString *PFRequestTraceMetadata(id request) {
+    if (!request) return @"request=(nil)";
+    id associatedAPI = objc_getAssociatedObject(request, &PFRequestAPIKey);
+    id associatedVersion = objc_getAssociatedObject(request, &PFRequestVersionKey);
+    id api = [associatedAPI isKindOfClass:[NSString class]] ? associatedAPI
+        : PFInvokeObservedObjectGetter(request, @selector(getApiName));
+    id version = [associatedVersion isKindOfClass:[NSString class]] ? associatedVersion
+        : PFInvokeObservedObjectGetter(request, @selector(getApiVersion));
+    return [NSString stringWithFormat:@"request=%p requestClass=%@ api=%@ version=%@ elapsedSinceInitMs=%.1f",
+            request, PFObjectClassName(request), PFSafeIdentifier(api), PFSafeIdentifier(version),
+            PFElapsedSinceRequestInit(request)];
+}
+
+static NSString *PFResponseTraceMetadata(id response) {
+    if (!response) return @"response=(nil)";
+    if ([response isKindOfClass:[NSDictionary class]] || [response isKindOfClass:[NSArray class]]) {
+        return PFResponseSummary(response);
+    }
+    id apiVersion = PFInvokeObservedObjectGetter(response, @selector(apiVersion));
+    id apiMethod = PFInvokeObservedObjectGetter(response, @selector(apiMethod));
+    id nestedRequest = PFInvokeObservedObjectGetter(response, @selector(request));
+    NSString *requestMeta = nestedRequest ? PFRequestTraceMetadata(nestedRequest) : @"request=(not-exposed)";
+    return [NSString stringWithFormat:@"class=%@ apiMethod=%@ apiVersion=%@ %@ shape={%@} safeCodes={%@}",
+            PFObjectClassName(response), PFSafeIdentifier(apiMethod), PFSafeIdentifier(apiVersion),
+            requestMeta, PFSafeShape(response), PFSafeResultCodes(response)];
+}
+
+static NSString *PFDelegateRequestTrace(id delegate) {
+    id request = PFInvokeObservedObjectGetter(delegate, @selector(request));
+    return request ? PFRequestTraceMetadata(request) : @"delegateRequest=(not-exposed)";
 }
 
 static BOOL PFIsApiRequestObject(id object) {
@@ -236,6 +282,8 @@ static id PFHookedMtopRequestInit(id self, SEL _cmd, id api, id version) {
     id result = original ? original(self, _cmd, api, version) : self;
     id tracked = result ?: self;
     objc_setAssociatedObject(tracked, &PFRequestStartTimeKey, @(CFAbsoluteTimeGetCurrent()), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if ([api isKindOfClass:[NSString class]]) objc_setAssociatedObject(tracked, &PFRequestAPIKey, api, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if ([version isKindOfClass:[NSString class]]) objc_setAssociatedObject(tracked, &PFRequestVersionKey, version, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     PFLog(@"MTOP_EVENT stage=request_init class=%@ request=%p api=%@ version=%@ thread=%p",
           PFObjectClassName(tracked), tracked, PFSafeIdentifier(api), PFSafeIdentifier(version), [NSThread currentThread]);
     return result;
@@ -245,6 +293,8 @@ static id PFHookedMtopRequestInitWithBiz(id self, SEL _cmd, id api, id version, 
     id result = PFOriginalMtopRequestInitWithBiz ? PFOriginalMtopRequestInitWithBiz(self, _cmd, api, version, bizId, bizTopic) : self;
     id tracked = result ?: self;
     objc_setAssociatedObject(tracked, &PFRequestStartTimeKey, @(CFAbsoluteTimeGetCurrent()), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if ([api isKindOfClass:[NSString class]]) objc_setAssociatedObject(tracked, &PFRequestAPIKey, api, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if ([version isKindOfClass:[NSString class]]) objc_setAssociatedObject(tracked, &PFRequestVersionKey, version, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     PFLog(@"MTOP_EVENT stage=request_init_biz class=%@ request=%p api=%@ version=%@ bizIdShape=%@ bizTopicShape=%@ thread=%p",
           PFObjectClassName(tracked), tracked, PFSafeIdentifier(api), PFSafeIdentifier(version),
           PFSafeShape(bizId), PFSafeShape(bizTopic), [NSThread currentThread]);
@@ -305,8 +355,8 @@ static id PFHookedMtopRequestResponse(id self, SEL _cmd) {
     id (*original)(id, SEL) = PFIsApiRequestObject(self)
         ? PFOriginalApiRequestResponse : PFOriginalMtopRequestResponse;
     id result = original ? original(self, _cmd) : nil;
-    PFLog(@"MTOP_EVENT stage=request_response request=%p class=%@ response={%@} elapsedSinceInitMs=%.1f",
-          self, PFObjectClassName(self), PFResponseSummary(result), PFElapsedSinceRequestInit(self));
+    PFLog(@"MTOP_EVENT stage=request_response %@ response={%@}",
+          PFRequestTraceMetadata(self), PFResponseTraceMetadata(result));
     return result;
 }
 
@@ -323,20 +373,21 @@ static void PFHookedMtopBridgePending(id self, SEL _cmd, id pending, id request,
 }
 
 static void PFHookedMtopDelegateSuccess(id self, SEL _cmd, id response) {
-    PFLog(@"MTOP_EVENT stage=delegate_success delegate=%p delegateClass=%@ response={%@}",
-          self, PFObjectClassName(self), PFResponseSummary(response));
+    PFLog(@"MTOP_EVENT stage=delegate_success delegate=%p delegateClass=%@ requestTrace={%@} responseTrace={%@}",
+          self, PFObjectClassName(self), PFDelegateRequestTrace(self), PFResponseTraceMetadata(response));
     if (PFOriginalMtopDelegateSuccess) PFOriginalMtopDelegateSuccess(self, _cmd, response);
 }
 
 static void PFHookedMtopDelegateFailure(id self, SEL _cmd, id error) {
-    PFLog(@"MTOP_EVENT stage=delegate_failure delegate=%p delegateClass=%@ error={%@}",
-          self, PFObjectClassName(self), PFErrorSummary(error));
+    PFLog(@"MTOP_EVENT stage=delegate_failure delegate=%p delegateClass=%@ requestTrace={%@} error={%@}",
+          self, PFObjectClassName(self), PFDelegateRequestTrace(self), PFErrorSummary(error));
     if (PFOriginalMtopDelegateFailure) PFOriginalMtopDelegateFailure(self, _cmd, error);
 }
 
 static void PFHookedMtopDelegateDidLoadCache(id self, SEL _cmd, id didLoadCache, id responseHeader, id body) {
-    PFLog(@"MTOP_EVENT stage=delegate_cache delegate=%p delegateClass=%@ cacheFlagShape=%@ headerShape={%@} body={%@}",
-          self, PFObjectClassName(self), PFSafeShape(didLoadCache), PFSafeShape(responseHeader), PFResponseSummary(body));
+    PFLog(@"MTOP_EVENT stage=delegate_cache delegate=%p delegateClass=%@ requestTrace={%@} cacheFlagShape=%@ headerShape={%@} bodyTrace={%@}",
+          self, PFObjectClassName(self), PFDelegateRequestTrace(self), PFSafeShape(didLoadCache),
+          PFSafeShape(responseHeader), PFResponseTraceMetadata(body));
     if (PFOriginalMtopDelegateDidLoadCache) PFOriginalMtopDelegateDidLoadCache(self, _cmd, didLoadCache, responseHeader, body);
 }
 
@@ -426,7 +477,8 @@ static void PFInstallGenericMtopObservationHooks(void) {
 
 static BOOL PFRelevantClassName(NSString *name) {
     NSString *n = name.lowercaseString;
-    return [n containsString:@"mtop"] ||
+    return [n isEqualToString:@"tbsdkserver"] ||
+           [n containsString:@"mtop"] ||
            [n containsString:@"xmodule"] ||
            [n containsString:@"apiprotocol"] ||
            [n containsString:@"apirequest"] ||
@@ -487,7 +539,15 @@ static void PFScanMtopClasses(NSString *reason) {
         for (unsigned int j = 0; j < methodCount && emitted < 120; j++) {
             SEL selector = method_getName(methods[j]);
             NSString *selName = NSStringFromSelector(selector);
-            if (!PFRelevantSelector(selName)) continue;
+            BOOL responseSDKClass = [name isEqualToString:@"TBSDKServer"] || [name isEqualToString:@"TBSDKMTOPServer"];
+            NSString *lowerSelector = selName.lowercaseString;
+            BOOL responseRelevant = responseSDKClass &&
+                ([lowerSelector containsString:@"status"] || [lowerSelector containsString:@"ret"] ||
+                 [lowerSelector containsString:@"code"] || [lowerSelector containsString:@"error"] ||
+                 [lowerSelector containsString:@"result"] || [lowerSelector containsString:@"body"] ||
+                 [lowerSelector containsString:@"data"] || [lowerSelector containsString:@"json"] ||
+                 [lowerSelector containsString:@"success"] || [lowerSelector containsString:@"header"]);
+            if (!PFRelevantSelector(selName) && !responseRelevant) continue;
             PFLog(@"MTOP_NATIVE_METHOD class=%@ selector=%@ types=%s",
                   name, selName, method_getTypeEncoding(methods[j]) ?: "(unknown)");
             emitted++;
