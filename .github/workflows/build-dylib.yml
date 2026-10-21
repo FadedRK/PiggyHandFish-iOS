@@ -1,4 +1,4 @@
-name: Build PiggyHandFish settings entry and diagnostics
+name: Build PiggyHandFish
 
 on:
   push:
@@ -10,12 +10,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: piggyhandfish-diagnostic-dylibs
+  group: piggyhandfish-build
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Build plugin, capture, and load-probe dylibs
+    name: Build main PiggyHandFish dylib
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -29,55 +29,42 @@ jobs:
           sdks-src: waruhachi/sdks
           sdks-branch: main
 
-      - name: Build standalone diagnostic dylibs
+      - name: Build main dylib
         shell: bash
         run: |
           set -euo pipefail
           make clean
-          make
+          make PiggyHandFish
           mkdir -p dist
 
-          build_universal() {
-            local target="$1"
-            local output="$2"
-            local arm64 arm64e
+          arm64="$(find .theos/obj -type f -path '*/arm64/PiggyHandFish.dylib' -print -quit)"
+          arm64e="$(find .theos/obj -type f -path '*/arm64e/PiggyHandFish.dylib' -print -quit)"
 
-            arm64="$(find .theos/obj -type f -path "*/arm64/${target}.dylib" -print -quit)"
-            arm64e="$(find .theos/obj -type f -path "*/arm64e/${target}.dylib" -print -quit)"
+          if [[ -z "$arm64" ]]; then
+            echo 'Theos did not produce arm64 PiggyHandFish.dylib.' >&2
+            find .theos/obj -type f -name '*.dylib' -print || true
+            exit 1
+          fi
 
-            if [[ -z "$arm64" ]]; then
-              echo "Theos did not produce arm64 ${target}.dylib." >&2
-              find .theos/obj -type f -name '*.dylib' -print || true
-              exit 1
-            fi
+          if [[ -n "$arm64e" ]]; then
+            lipo -create "$arm64" "$arm64e" -output dist/PiggyHandFish.dylib
+          else
+            cp "$arm64" dist/PiggyHandFish.dylib
+          fi
 
-            if [[ -n "$arm64e" ]]; then
-              lipo -create "$arm64" "$arm64e" -output "$output"
-            else
-              cp "$arm64" "$output"
-            fi
-
-            install_name_tool -id "@rpath/$(basename "$output")" "$output"
-            file "$output"
-            lipo -info "$output"
-            test -s "$output"
-          }
-
-          build_universal PiggyHandFish dist/PiggyHandFish.dylib
-          build_universal PiggyHandFishCapture dist/PiggyHandFish-Capture.dylib
-          build_universal PiggyHandFishProbe dist/PiggyHandFish-LoadProbe.dylib
-
-          shasum -a 256 dist/PiggyHandFish.dylib dist/PiggyHandFish-Capture.dylib dist/PiggyHandFish-LoadProbe.dylib | tee dist/SHA256SUMS.txt
+          install_name_tool -id '@rpath/PiggyHandFish.dylib' dist/PiggyHandFish.dylib
+          file dist/PiggyHandFish.dylib
+          lipo -info dist/PiggyHandFish.dylib
+          test -s dist/PiggyHandFish.dylib
+          shasum -a 256 dist/PiggyHandFish.dylib | tee dist/SHA256SUMS.txt
           ls -lh dist
 
-      - name: Upload diagnostic artifacts
+      - name: Upload main plugin artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PiggyHandFish-Diagnostics-${{ github.sha }}
+          name: PiggyHandFish-${{ github.sha }}
           path: |
             dist/PiggyHandFish.dylib
-            dist/PiggyHandFish-Capture.dylib
-            dist/PiggyHandFish-LoadProbe.dylib
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
