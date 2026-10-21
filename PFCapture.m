@@ -7,10 +7,14 @@
 
 static NSInteger const PFCaptureButtonTag = 0x50464331;
 
+static IMP gRouterOpen3Original = NULL;
 static IMP gRouterOpen4Original = NULL;
+static IMP gRouterSafeOpen1Original = NULL;
 static IMP gRouterSafeOpen4Original = NULL;
 static IMP gRouterHandleOriginal = NULL;
+static IMP gRouterCallHandlerOriginal = NULL;
 static IMP gRouterOpenViewControllerOriginal = NULL;
+static IMP gRouterCreateRouterObjectOriginal = NULL;
 static IMP gRouterPreProcessURLOriginal = NULL;
 static IMP gUIApplicationOpenURLOriginal = NULL;
 static IMP gUIApplicationOpenURLLegacyOriginal = NULL;
@@ -346,10 +350,15 @@ static BOOL PFCaptureInstallHook(Class cls,
     }
 }
 
+static BOOL PFCaptureRouterOpenURLThreeBool(id self, SEL cmd, id url, id query, id params);
 static BOOL PFCaptureRouterOpenURLFourBool(id self, SEL cmd, id url, id query, id params, id uniqueID);
 static id PFCaptureRouterOpenURLFourObject(id self, SEL cmd, id url, id query, id params, id uniqueID);
+static BOOL PFCaptureSafeOpenURLOneBool(id self, SEL cmd, id url);
 static BOOL PFCaptureSafeOpenURLFourBool(id self, SEL cmd, id url, id query, id params, id uniqueID);
 static id PFCaptureSafeOpenURLFourObject(id self, SEL cmd, id url, id query, id params, id uniqueID);
+static void PFCaptureRouterCallHandler(id self, SEL cmd, Class handlerClass, id object);
+static void PFCaptureRouterOpenViewController(id self, SEL cmd, Class routerClass, id object);
+static id PFCaptureRouterCreateRouterObject(id self, SEL cmd, id url, id query, id params);
 
 static BOOL PFCaptureInstallRouterFourArgumentHook(Class cls,
                                                     SEL selector,
@@ -400,6 +409,24 @@ static id PFCaptureRouterOpenURLFourObject(id self, SEL cmd, id url, id query, i
         : nil;
 }
 
+static BOOL PFCaptureRouterOpenURLThreeBool(id self, SEL cmd, id url, id query, id params) {
+    PFCaptureLogRouteEvent(@"-[FMURLRouter openURL:withQuery:withParams:]", url);
+    BOOL result = ((BOOL (*)(id, SEL, id, id, id))gRouterOpen3Original)
+        ? ((BOOL (*)(id, SEL, id, id, id))gRouterOpen3Original)(self, cmd, url, query, params)
+        : NO;
+    PFCaptureLog(@"ROUTER_RESULT openURL:withParams: result=%d", result);
+    return result;
+}
+
+static BOOL PFCaptureSafeOpenURLOneBool(id self, SEL cmd, id url) {
+    PFCaptureLogRouteEvent(@"+[FMURLRouter safeOpenURL:]", url);
+    BOOL result = ((BOOL (*)(id, SEL, id))gRouterSafeOpen1Original)
+        ? ((BOOL (*)(id, SEL, id))gRouterSafeOpen1Original)(self, cmd, url)
+        : NO;
+    PFCaptureLog(@"ROUTER_RESULT safeOpenURL: result=%d", result);
+    return result;
+}
+
 static BOOL PFCaptureSafeOpenURLFourBool(id self, SEL cmd, id url, id query, id params, id uniqueID) {
     PFCaptureLogRouteEvent(@"+[FMURLRouter safeOpenURL:withQuery:withParams:withUniqueid:]", url);
     BOOL result = ((BOOL (*)(id, SEL, id, id, id, id))gRouterSafeOpen4Original)
@@ -416,19 +443,39 @@ static id PFCaptureSafeOpenURLFourObject(id self, SEL cmd, id url, id query, id 
         : nil;
 }
 
-static void PFCaptureRouterHandle(id self, SEL cmd, id routeObject, id object) {
-    PFCaptureLogRouteEvent(@"-[FMURLRouter handle:withObject:] arg1", routeObject);
-    PFCaptureLogRouteEvent(@"-[FMURLRouter handle:withObject:] arg2", object);
+static void PFCaptureRouterHandle(id self, SEL cmd, Class routeClass, id object) {
+    PFCaptureLog(@"ROUTER_HANDLE class=%@", routeClass ? NSStringFromClass(routeClass) : @"(nil)");
+    PFCaptureLogRouteEvent(@"-[FMURLRouter handle:withObject:] object", object);
     if (gRouterHandleOriginal) {
-        ((void (*)(id, SEL, id, id))gRouterHandleOriginal)(self, cmd, routeObject, object);
+        ((void (*)(id, SEL, Class, id))gRouterHandleOriginal)(self, cmd, routeClass, object);
     }
 }
 
-static id PFCaptureRouterOpenViewController(id self, SEL cmd, id router, id object) {
-    PFCaptureLogRouteEvent(@"-[FMURLRouter openViewController:withObject:]", object);
-    return ((id (*)(id, SEL, id, id))gRouterOpenViewControllerOriginal)
-        ? ((id (*)(id, SEL, id, id))gRouterOpenViewControllerOriginal)(self, cmd, router, object)
+static void PFCaptureRouterCallHandler(id self, SEL cmd, Class handlerClass, id object) {
+    PFCaptureLog(@"ROUTER_CALL_HANDLER class=%@", handlerClass ? NSStringFromClass(handlerClass) : @"(nil)");
+    PFCaptureLogRouteEvent(@"-[FMURLRouter callHandler:withObject:] object", object);
+    if (gRouterCallHandlerOriginal) {
+        ((void (*)(id, SEL, Class, id))gRouterCallHandlerOriginal)(self, cmd, handlerClass, object);
+    }
+}
+
+static void PFCaptureRouterOpenViewController(id self, SEL cmd, Class routerClass, id object) {
+    PFCaptureLog(@"ROUTER_OPEN_VIEW_CONTROLLER class=%@", routerClass ? NSStringFromClass(routerClass) : @"(nil)");
+    PFCaptureLogRouteEvent(@"-[FMURLRouter openViewController:withObject:] object", object);
+    if (gRouterOpenViewControllerOriginal) {
+        ((void (*)(id, SEL, Class, id))gRouterOpenViewControllerOriginal)(self, cmd, routerClass, object);
+    }
+}
+
+static id PFCaptureRouterCreateRouterObject(id self, SEL cmd, id url, id query, id params) {
+    PFCaptureLogRouteEvent(@"-[FMURLRouter createRouterObject:withQuery:withParams:] url", url);
+    id result = ((id (*)(id, SEL, id, id, id))gRouterCreateRouterObjectOriginal)
+        ? ((id (*)(id, SEL, id, id, id))gRouterCreateRouterObjectOriginal)(self, cmd, url, query, params)
         : nil;
+    NSString *route = PFCaptureRouteSummary(result);
+    if (route.length) PFCaptureLog(@"ROUTER_OBJECT %@", route);
+    else PFCaptureLog(@"ROUTER_OBJECT class=%@", result ? NSStringFromClass([result class]) : @"(nil)");
+    return result;
 }
 
 static id PFCaptureRouterPreProcessURL(id self, SEL cmd, id url) {
@@ -837,9 +884,31 @@ static void PFCaptureWriteRuntimeInventory(void) {
 static void PFCaptureInstallHooks(void) {
     Class router = NSClassFromString(@"FMURLRouter");
     if (router) {
+        SEL openThreeSelector = sel_registerName("openURL:withQuery:withParams:");
+        Method openThreeMethod = class_getInstanceMethod(router, openThreeSelector);
+        if (openThreeMethod && method_getNumberOfArguments(openThreeMethod) == 5 &&
+            PFCaptureIsBooleanMethod(openThreeMethod)) {
+            PFCaptureInstallHook(router, openThreeSelector, NO,
+                                 (IMP)PFCaptureRouterOpenURLThreeBool,
+                                 &gRouterOpen3Original, 5, 'B');
+        } else {
+            PFCaptureLog(@"HOOK_SKIP -[FMURLRouter openURL:withQuery:withParams:] unavailable or unexpected signature");
+        }
+
         PFCaptureInstallRouterFourArgumentHook(
             router, sel_registerName("openURL:withQuery:withParams:withUniqueid:"),
             NO, &gRouterOpen4Original);
+
+        SEL safeOneSelector = sel_registerName("safeOpenURL:");
+        Method safeOneMethod = class_getClassMethod(router, safeOneSelector);
+        if (safeOneMethod && method_getNumberOfArguments(safeOneMethod) == 3 &&
+            PFCaptureIsBooleanMethod(safeOneMethod)) {
+            PFCaptureInstallHook(router, safeOneSelector, YES,
+                                 (IMP)PFCaptureSafeOpenURLOneBool,
+                                 &gRouterSafeOpen1Original, 3, 'B');
+        } else {
+            PFCaptureLog(@"HOOK_SKIP +[FMURLRouter safeOpenURL:] unavailable or unexpected signature");
+        }
         PFCaptureInstallRouterFourArgumentHook(
             router, sel_registerName("safeOpenURL:withQuery:withParams:withUniqueid:"),
             YES, &gRouterSafeOpen4Original);
@@ -852,12 +921,30 @@ static void PFCaptureInstallHooks(void) {
                                  &gRouterHandleOriginal, 4, 'v');
         }
 
+        SEL callHandlerSelector = sel_registerName("callHandler:withObject:");
+        Method callHandlerMethod = class_getInstanceMethod(router, callHandlerSelector);
+        if (callHandlerMethod && method_getNumberOfArguments(callHandlerMethod) == 4 &&
+            PFCaptureIsVoidMethod(callHandlerMethod)) {
+            PFCaptureInstallHook(router, callHandlerSelector, NO, (IMP)PFCaptureRouterCallHandler,
+                                 &gRouterCallHandlerOriginal, 4, 'v');
+        }
+
         SEL openVCSelector = sel_registerName("openViewController:withObject:");
         Method openVCMethod = class_getInstanceMethod(router, openVCSelector);
         if (openVCMethod && method_getNumberOfArguments(openVCMethod) == 4 &&
-            PFCaptureIsObjectMethod(openVCMethod)) {
+            PFCaptureIsVoidMethod(openVCMethod)) {
             PFCaptureInstallHook(router, openVCSelector, NO, (IMP)PFCaptureRouterOpenViewController,
-                                 &gRouterOpenViewControllerOriginal, 4, 0);
+                                 &gRouterOpenViewControllerOriginal, 4, 'v');
+        } else {
+            PFCaptureLog(@"HOOK_SKIP -[FMURLRouter openViewController:withObject:] unavailable or unexpected signature");
+        }
+
+        SEL createRouterObjectSelector = sel_registerName("createRouterObject:withQuery:withParams:");
+        Method createRouterObjectMethod = class_getInstanceMethod(router, createRouterObjectSelector);
+        if (createRouterObjectMethod && method_getNumberOfArguments(createRouterObjectMethod) == 5 &&
+            PFCaptureIsObjectMethod(createRouterObjectMethod)) {
+            PFCaptureInstallHook(router, createRouterObjectSelector, NO, (IMP)PFCaptureRouterCreateRouterObject,
+                                 &gRouterCreateRouterObjectOriginal, 5, 0);
         }
 
         SEL preProcessSelector = sel_registerName("preProcessURL:");
