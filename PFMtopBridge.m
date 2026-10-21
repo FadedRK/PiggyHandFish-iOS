@@ -14,38 +14,172 @@ static id (*PFOriginalFMRequestApiParameter)(id, SEL, BOOL);
 static void (*PFOriginalFMHandleResponse)(id, SEL, BOOL, id, id, id, BOOL, BOOL);
 
 static id (*PFOriginalMtopRequestInit)(id, SEL, id, id);
+static id (*PFOriginalMtopRequestInitWithBiz)(id, SEL, id, id, id, id);
 static id (*PFOriginalMtopRequestAddParameter)(id, SEL, id, id);
+static id (*PFOriginalMtopRequestAddHttpParameter)(id, SEL, id, id);
+static id (*PFOriginalMtopRequestAddHttpParameterNoneURLEncoding)(id, SEL, id, id);
+static id (*PFOriginalMtopRequestAddHttpParameters)(id, SEL, id);
 static id (*PFOriginalMtopRequestAddParameters)(id, SEL, id);
 static id (*PFOriginalMtopRequestResponse)(id, SEL);
+static void (*PFOriginalMtopRequestGenerate)(id, SEL);
 static id (*PFOriginalApiRequestInit)(id, SEL, id, id);
 static id (*PFOriginalApiRequestAddParameter)(id, SEL, id, id);
+static id (*PFOriginalApiRequestAddHttpParameter)(id, SEL, id, id);
+static id (*PFOriginalApiRequestAddHttpParameters)(id, SEL, id);
 static id (*PFOriginalApiRequestAddParameters)(id, SEL, id);
 static id (*PFOriginalApiRequestResponse)(id, SEL);
+static void (*PFOriginalApiRequestGenerate)(id, SEL);
 static void (*PFOriginalMtopBridgeSend)(id, SEL, id, id, id);
+static void (*PFOriginalMtopBridgePending)(id, SEL, id, id, id);
 static void (*PFOriginalMtopDelegateSuccess)(id, SEL, id);
 static void (*PFOriginalMtopDelegateFailure)(id, SEL, id);
+static void (*PFOriginalMtopDelegateDidLoadCache)(id, SEL, id, id, id);
+static char PFRequestStartTimeKey;
 
+// Privacy-safe request/response logging: retain field names and value shapes,
+// but never dump arbitrary parameter values, cookies, tokens, signatures, or bodies.
 static NSString *PFObjectClassName(id object) {
     return object ? NSStringFromClass([object class]) : @"(nil)";
 }
 
-// Deliberately log only structural metadata. Do not dump parameter values,
-// cookies, tokens, account identifiers, or response contents.
-static NSString *PFSafeShape(id object) {
+static NSString *PFSafeIdentifier(id object) {
+    if ([object isKindOfClass:[NSString class]]) {
+        NSString *value = (NSString *)object;
+        if (value.length <= 120) {
+            NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+                                       @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:-"];
+            if ([value rangeOfCharacterFromSet:allowed.invertedSet].location == NSNotFound) return value;
+        }
+        return [NSString stringWithFormat:@"<NSString len=%lu>", (unsigned long)value.length];
+    }
+    if ([object isKindOfClass:[NSNumber class]]) return PFObjectClassName(object);
+    return PFObjectClassName(object);
+}
+
+static NSString *PFSafeShapeAtDepth(id object, NSUInteger depth) {
     if (!object) return @"(nil)";
+    if (depth > 2) return PFObjectClassName(object);
+
     if ([object isKindOfClass:[NSDictionary class]]) {
-        NSArray *keys = [[(NSDictionary *)object allKeys] sortedArrayUsingComparator:
-                         ^NSComparisonResult(id a, id b) {
+        NSDictionary *dictionary = (NSDictionary *)object;
+        NSArray *keys = [[dictionary allKeys] sortedArrayUsingComparator:^NSComparisonResult(id a, id b) {
             return [[a description] compare:[b description]];
         }];
-        return [NSString stringWithFormat:@"%@ count=%lu keys=%@",
-                PFObjectClassName(object), (unsigned long)keys.count, keys];
+        NSMutableArray *fields = [NSMutableArray array];
+        NSUInteger limit = MIN(keys.count, 24);
+        for (NSUInteger i = 0; i < limit; i++) {
+            id key = keys[i];
+            NSString *keyName = [key isKindOfClass:[NSString class]]
+                ? ([(NSString *)key length] <= 100 ? (NSString *)key : @"<long-key>")
+                : [NSString stringWithFormat:@"<%@-key>", PFObjectClassName(key)];
+            id value = dictionary[key];
+            [fields addObject:[NSString stringWithFormat:@"%@:%@", keyName, PFSafeShapeAtDepth(value, depth + 1)]];
+        }
+        if (keys.count > limit) [fields addObject:[NSString stringWithFormat:@"...(+%lu keys)", (unsigned long)(keys.count - limit)]];
+        return [NSString stringWithFormat:@"%@ count=%lu fields={%@}",
+                PFObjectClassName(object), (unsigned long)keys.count, [fields componentsJoinedByString:@","]];
     }
+
     if ([object isKindOfClass:[NSArray class]]) {
-        return [NSString stringWithFormat:@"%@ count=%lu",
-                PFObjectClassName(object), (unsigned long)[(NSArray *)object count]];
+        NSArray *array = (NSArray *)object;
+        NSMutableArray *items = [NSMutableArray array];
+        NSUInteger limit = MIN(array.count, 5);
+        for (NSUInteger i = 0; i < limit; i++) {
+            [items addObject:PFSafeShapeAtDepth(array[i], depth + 1)];
+        }
+        if (array.count > limit) [items addObject:@"..."];
+        return [NSString stringWithFormat:@"%@ count=%lu items=[%@]",
+                PFObjectClassName(object), (unsigned long)array.count, [items componentsJoinedByString:@","]];
+    }
+
+    if ([object isKindOfClass:[NSString class]]) {
+        return [NSString stringWithFormat:@"%@ len=%lu", PFObjectClassName(object), (unsigned long)[(NSString *)object length]];
+    }
+    if ([object isKindOfClass:[NSData class]]) {
+        return [NSString stringWithFormat:@"%@ len=%lu", PFObjectClassName(object), (unsigned long)[(NSData *)object length]];
+    }
+    if ([object isKindOfClass:[NSError class]]) {
+        return [NSString stringWithFormat:@"%@ code=%ld userInfoShape=%@",
+                PFObjectClassName(object), (long)[(NSError *)object code],
+                PFSafeShapeAtDepth([(NSError *)object userInfo], depth + 1)];
     }
     return PFObjectClassName(object);
+}
+
+static NSString *PFSafeShape(id object) {
+    return PFSafeShapeAtDepth(object, 0);
+}
+
+static BOOL PFSafeCodeString(NSString *value) {
+    if (![value isKindOfClass:[NSString class]] || value.length == 0 || value.length > 80) return NO;
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+                               @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_:-."];
+    return [value rangeOfCharacterFromSet:allowed.invertedSet].location == NSNotFound;
+}
+
+static void PFCollectSafeResultCodes(id object, NSString *prefix, NSUInteger depth, NSMutableArray<NSString *> *output) {
+    if (!object || depth > 3 || output.count >= 16) return;
+    NSSet *safeKeys = [NSSet setWithArray:@[@"ret", @"code", @"status", @"success", @"errorcode", @"errcode", @"errno", @"msgcode", @"resultcode"]];
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dictionary = (NSDictionary *)object;
+        for (id rawKey in dictionary) {
+            if (output.count >= 16) break;
+            if (![rawKey isKindOfClass:[NSString class]]) continue;
+            NSString *key = (NSString *)rawKey;
+            id value = dictionary[rawKey];
+            NSString *path = prefix.length ? [NSString stringWithFormat:@"%@.%@", prefix, key] : key;
+            NSString *lower = key.lowercaseString;
+            if ([safeKeys containsObject:lower]) {
+                if ([value isKindOfClass:[NSNumber class]]) {
+                    [output addObject:[NSString stringWithFormat:@"%@=%@", path, value]];
+                } else if ([value isKindOfClass:[NSString class]] && PFSafeCodeString(value)) {
+                    [output addObject:[NSString stringWithFormat:@"%@=%@", path, value]];
+                } else if (value == [NSNull null]) {
+                    [output addObject:[NSString stringWithFormat:@"%@=(null)", path]];
+                }
+            }
+            if ([value isKindOfClass:[NSDictionary class]] || [value isKindOfClass:[NSArray class]]) {
+                PFCollectSafeResultCodes(value, path, depth + 1, output);
+            }
+        }
+    } else if ([object isKindOfClass:[NSArray class]]) {
+        NSArray *array = (NSArray *)object;
+        NSUInteger limit = MIN(array.count, 8);
+        for (NSUInteger i = 0; i < limit && output.count < 16; i++) {
+            PFCollectSafeResultCodes(array[i], [NSString stringWithFormat:@"%@[%lu]", prefix, (unsigned long)i], depth + 1, output);
+        }
+    }
+}
+
+static NSString *PFSafeResultCodes(id object) {
+    NSMutableArray<NSString *> *codes = [NSMutableArray array];
+    PFCollectSafeResultCodes(object, @"", 0, codes);
+    return codes.count ? [codes componentsJoinedByString:@","] : @"(no-safe-status-fields)";
+}
+
+static NSString *PFResponseSummary(id object) {
+    return [NSString stringWithFormat:@"shape={%@} safeCodes={%@}", PFSafeShape(object), PFSafeResultCodes(object)];
+}
+
+static NSString *PFErrorSummary(id error) {
+    if (!error) return @"(nil)";
+    if ([error isKindOfClass:[NSError class]]) {
+        NSError *e = (NSError *)error;
+        return [NSString stringWithFormat:@"%@ code=%ld userInfoShape={%@}",
+                PFObjectClassName(error), (long)e.code, PFSafeShape(e.userInfo)];
+    }
+    return PFSafeShape(error);
+}
+
+static CFTimeInterval PFElapsedSinceRequestInit(id object) {
+    NSNumber *start = objc_getAssociatedObject(object, &PFRequestStartTimeKey);
+    return start ? MAX(0, CFAbsoluteTimeGetCurrent() - start.doubleValue) * 1000.0 : -1;
+}
+
+static BOOL PFIsApiRequestObject(id object) {
+    if (!object) return NO;
+    Class apiRequestClass = NSClassFromString(@"ApiRequest");
+    return apiRequestClass && [object isKindOfClass:apiRequestClass];
 }
 
 static BOOL PFIsApiRequestObject(id object) {
@@ -70,9 +204,9 @@ static id PFHookedFMRequestApiParameter(id self, SEL _cmd, BOOL isPrefetch) {
 
 static void PFHookedFMHandleResponse(id self, SEL _cmd, BOOL success, id data, id error,
                                      id requestModel, BOOL refresh, BOOL atLaunch) {
-    PFLog(@"MTOP_OBSERVED_FM_TABLE_RESPONSE class=%@ success=%d dataShape=%@ errorClass=%@ requestClass=%@ refresh=%d atLaunch=%d",
-          NSStringFromClass([self class]), success, PFSafeShape(data),
-          PFObjectClassName(error), PFObjectClassName(requestModel), refresh, atLaunch);
+    PFLog(@"MTOP_EVENT stage=fm_table_response class=%@ success=%d response={%@} error={%@} requestClass=%@ request=%p refresh=%d atLaunch=%d",
+          NSStringFromClass([self class]), success, PFResponseSummary(data), PFErrorSummary(error),
+          PFObjectClassName(requestModel), requestModel, refresh, atLaunch);
     if (PFOriginalFMHandleResponse) {
         PFOriginalFMHandleResponse(self, _cmd, success, data, error, requestModel, refresh, atLaunch);
     }
@@ -104,65 +238,147 @@ static void PFInstallFMTablePageMtopHooks(void) {
           NSStringFromClass(cls));
 }
 
+static id PFHookedFMRequestApiName(id self, SEL _cmd) {
+    id result = PFOriginalFMRequestApiName ? PFOriginalFMRequestApiName(self, _cmd) : nil;
+    PFLog(@"MTOP_EVENT stage=fm_table_api class=%@ api=%@", NSStringFromClass([self class]), PFSafeIdentifier(result));
+    return result;
+}
+
+static id PFHookedFMRequestApiParameter(id self, SEL _cmd, BOOL isPrefetch) {
+    id result = PFOriginalFMRequestApiParameter ? PFOriginalFMRequestApiParameter(self, _cmd, isPrefetch) : nil;
+    PFLog(@"MTOP_EVENT stage=fm_table_parameters class=%@ prefetch=%d %@", NSStringFromClass([self class]), isPrefetch, PFResponseSummary(result));
+    return result;
+}
+
+static void PFHookedFMHandleResponse(id self, SEL _cmd, BOOL success, id data, id error,
+                                     id requestModel, BOOL refresh, BOOL atLaunch) {
+    PFLog(@"MTOP_EVENT stage=fm_table_response class=%@ success=%d response={%@} error={%@} requestClass=%@ request=%p refresh=%d atLaunch=%d",
+          NSStringFromClass([self class]), success, PFResponseSummary(data), PFErrorSummary(error),
+          PFObjectClassName(requestModel), requestModel, refresh, atLaunch);
+    if (PFOriginalFMHandleResponse) {
+        PFOriginalFMHandleResponse(self, _cmd, success, data, error, requestModel, refresh, atLaunch);
+    }
+}
+
 static id PFHookedMtopRequestInit(id self, SEL _cmd, id api, id version) {
     id (*original)(id, SEL, id, id) = PFIsApiRequestObject(self)
         ? PFOriginalApiRequestInit : PFOriginalMtopRequestInit;
     id result = original ? original(self, _cmd, api, version) : self;
-    PFLog(@"MTOP_OBSERVED_REQUEST_INIT class=%@ api=%@ version=%@",
-          PFObjectClassName(result ?: self), api ?: @"(nil)", version ?: @"(nil)");
+    id tracked = result ?: self;
+    objc_setAssociatedObject(tracked, &PFRequestStartTimeKey, @(CFAbsoluteTimeGetCurrent()), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    PFLog(@"MTOP_EVENT stage=request_init class=%@ request=%p api=%@ version=%@ thread=%p",
+          PFObjectClassName(tracked), tracked, PFSafeIdentifier(api), PFSafeIdentifier(version), [NSThread currentThread]);
+    return result;
+}
+
+static id PFHookedMtopRequestInitWithBiz(id self, SEL _cmd, id api, id version, id bizId, id bizTopic) {
+    id result = PFOriginalMtopRequestInitWithBiz ? PFOriginalMtopRequestInitWithBiz(self, _cmd, api, version, bizId, bizTopic) : self;
+    id tracked = result ?: self;
+    objc_setAssociatedObject(tracked, &PFRequestStartTimeKey, @(CFAbsoluteTimeGetCurrent()), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    PFLog(@"MTOP_EVENT stage=request_init_biz class=%@ request=%p api=%@ version=%@ bizIdShape=%@ bizTopicShape=%@ thread=%p",
+          PFObjectClassName(tracked), tracked, PFSafeIdentifier(api), PFSafeIdentifier(version),
+          PFSafeShape(bizId), PFSafeShape(bizTopic), [NSThread currentThread]);
     return result;
 }
 
 static id PFHookedMtopRequestAddParameter(id self, SEL _cmd, id value, id key) {
     id (*original)(id, SEL, id, id) = PFIsApiRequestObject(self)
         ? PFOriginalApiRequestAddParameter : PFOriginalMtopRequestAddParameter;
-    PFLog(@"MTOP_OBSERVED_PARAMETER_KEY class=%@ key=%@ valueClass=%@",
-          PFObjectClassName(self), [key isKindOfClass:[NSString class]] ? key : @"(non-string-key)",
-          PFObjectClassName(value));
+    PFLog(@"MTOP_EVENT stage=request_parameter request=%p class=%@ source=addParameter key=%@ valueShape=%@ elapsedMs=%.1f",
+          self, PFObjectClassName(self), PFSafeIdentifier(key), PFSafeShape(value), PFElapsedSinceRequestInit(self));
     return original ? original(self, _cmd, value, key) : self;
+}
+
+static id PFHookedMtopRequestAddHttpParameter(id self, SEL _cmd, id value, id key) {
+    id (*original)(id, SEL, id, id) = PFIsApiRequestObject(self)
+        ? PFOriginalApiRequestAddHttpParameter : PFOriginalMtopRequestAddHttpParameter;
+    PFLog(@"MTOP_EVENT stage=request_parameter request=%p class=%@ source=addHttpParameter key=%@ valueShape=%@ elapsedMs=%.1f",
+          self, PFObjectClassName(self), PFSafeIdentifier(key), PFSafeShape(value), PFElapsedSinceRequestInit(self));
+    return original ? original(self, _cmd, value, key) : self;
+}
+
+static id PFHookedMtopRequestAddHttpParameterNoneURLEncoding(id self, SEL _cmd, id value, id key) {
+    PFLog(@"MTOP_EVENT stage=request_parameter request=%p class=%@ source=addHttpParameterNoneURLEncoding key=%@ valueShape=%@ elapsedMs=%.1f",
+          self, PFObjectClassName(self), PFSafeIdentifier(key), PFSafeShape(value), PFElapsedSinceRequestInit(self));
+    return PFOriginalMtopRequestAddHttpParameterNoneURLEncoding
+        ? PFOriginalMtopRequestAddHttpParameterNoneURLEncoding(self, _cmd, value, key) : self;
+}
+
+static id PFHookedMtopRequestAddHttpParameters(id self, SEL _cmd, id params) {
+    id (*original)(id, SEL, id) = PFIsApiRequestObject(self)
+        ? PFOriginalApiRequestAddHttpParameters : PFOriginalMtopRequestAddHttpParameters;
+    PFLog(@"MTOP_EVENT stage=request_parameter_batch request=%p class=%@ source=addHttpParameters params={%@} elapsedMs=%.1f",
+          self, PFObjectClassName(self), PFSafeShape(params), PFElapsedSinceRequestInit(self));
+    return original ? original(self, _cmd, params) : self;
 }
 
 static id PFHookedMtopRequestAddParameters(id self, SEL _cmd, id params) {
     id (*original)(id, SEL, id) = PFIsApiRequestObject(self)
         ? PFOriginalApiRequestAddParameters : PFOriginalMtopRequestAddParameters;
-    PFLog(@"MTOP_OBSERVED_PARAMETER_KEYS class=%@ shape=%@",
-          PFObjectClassName(self), PFSafeShape(params));
+    PFLog(@"MTOP_EVENT stage=request_parameter_batch request=%p class=%@ source=addParameters params={%@} elapsedMs=%.1f",
+          self, PFObjectClassName(self), PFSafeShape(params), PFElapsedSinceRequestInit(self));
     return original ? original(self, _cmd, params) : self;
+}
+
+static void PFHookedMtopRequestGenerate(id self, SEL _cmd) {
+    BOOL isAPI = PFIsApiRequestObject(self);
+    void (*original)(id, SEL) = isAPI ? PFOriginalApiRequestGenerate : PFOriginalMtopRequestGenerate;
+    CFTimeInterval start = CFAbsoluteTimeGetCurrent();
+    PFLog(@"MTOP_EVENT stage=request_generate_begin request=%p class=%@ elapsedSinceInitMs=%.1f",
+          self, PFObjectClassName(self), PFElapsedSinceRequestInit(self));
+    if (original) original(self, _cmd);
+    PFLog(@"MTOP_EVENT stage=request_generate_end request=%p class=%@ generateMs=%.1f totalSinceInitMs=%.1f",
+          self, PFObjectClassName(self), (CFAbsoluteTimeGetCurrent() - start) * 1000.0, PFElapsedSinceRequestInit(self));
 }
 
 static id PFHookedMtopRequestResponse(id self, SEL _cmd) {
     id (*original)(id, SEL) = PFIsApiRequestObject(self)
         ? PFOriginalApiRequestResponse : PFOriginalMtopRequestResponse;
     id result = original ? original(self, _cmd) : nil;
-    PFLog(@"MTOP_OBSERVED_REQUEST_RESPONSE class=%@ responseShape=%@",
-          PFObjectClassName(self), PFSafeShape(result));
+    PFLog(@"MTOP_EVENT stage=request_response request=%p class=%@ response={%@} elapsedSinceInitMs=%.1f",
+          self, PFObjectClassName(self), PFResponseSummary(result), PFElapsedSinceRequestInit(self));
     return result;
 }
 
 static void PFHookedMtopBridgeSend(id self, SEL _cmd, id request, id callback, id ext) {
-    PFLog(@"MTOP_OBSERVED_BRIDGE_SEND bridgeClass=%@ requestShape=%@ callbackClass=%@ extShape=%@",
-          PFObjectClassName(self), PFSafeShape(request), PFObjectClassName(callback), PFSafeShape(ext));
+    PFLog(@"MTOP_EVENT stage=bridge_send bridge=%p bridgeClass=%@ request=%p requestClass=%@ callbackClass=%@ ext={%@}",
+          self, PFObjectClassName(self), request, PFObjectClassName(request), PFObjectClassName(callback), PFSafeShape(ext));
     if (PFOriginalMtopBridgeSend) PFOriginalMtopBridgeSend(self, _cmd, request, callback, ext);
 }
 
+static void PFHookedMtopBridgePending(id self, SEL _cmd, id request, id delegate, id extra) {
+    PFLog(@"MTOP_EVENT stage=bridge_pending bridge=%p bridgeClass=%@ request=%p requestClass=%@ delegate=%p delegateClass=%@ extraShape=%@",
+          self, PFObjectClassName(self), request, PFObjectClassName(request), delegate, PFObjectClassName(delegate), PFSafeShape(extra));
+    if (PFOriginalMtopBridgePending) PFOriginalMtopBridgePending(self, _cmd, request, delegate, extra);
+}
+
 static void PFHookedMtopDelegateSuccess(id self, SEL _cmd, id response) {
-    PFLog(@"MTOP_OBSERVED_DELEGATE_SUCCESS delegateClass=%@ responseShape=%@",
-          PFObjectClassName(self), PFSafeShape(response));
+    PFLog(@"MTOP_EVENT stage=delegate_success delegate=%p delegateClass=%@ response={%@}",
+          self, PFObjectClassName(self), PFResponseSummary(response));
     if (PFOriginalMtopDelegateSuccess) PFOriginalMtopDelegateSuccess(self, _cmd, response);
 }
 
 static void PFHookedMtopDelegateFailure(id self, SEL _cmd, id error) {
-    PFLog(@"MTOP_OBSERVED_DELEGATE_FAILURE delegateClass=%@ errorClass=%@",
-          PFObjectClassName(self), PFObjectClassName(error));
+    PFLog(@"MTOP_EVENT stage=delegate_failure delegate=%p delegateClass=%@ error={%@}",
+          self, PFObjectClassName(self), PFErrorSummary(error));
     if (PFOriginalMtopDelegateFailure) PFOriginalMtopDelegateFailure(self, _cmd, error);
 }
 
-static BOOL PFReplaceMethod(Class cls, SEL selector, IMP replacement, IMP *originalOut) {
+static void PFHookedMtopDelegateDidLoadCache(id self, SEL _cmd, id didLoadCache, id responseHeader, id body) {
+    PFLog(@"MTOP_EVENT stage=delegate_cache delegate=%p delegateClass=%@ cacheFlagShape=%@ headerShape={%@} body={%@}",
+          self, PFObjectClassName(self), PFSafeShape(didLoadCache), PFSafeShape(responseHeader), PFResponseSummary(body));
+    if (PFOriginalMtopDelegateDidLoadCache) PFOriginalMtopDelegateDidLoadCache(self, _cmd, didLoadCache, responseHeader, body);
+}
+
+static BOOL PFReplaceMethod(Class cls, SEL selector, IMP replacement, IMP *originalOut) {static BOOL PFReplaceMethod(Class cls, SEL selector, IMP replacement, IMP *originalOut) {
     if (!cls || !selector || !replacement || !originalOut) return NO;
     Method method = class_getInstanceMethod(cls, selector);
     if (!method) return NO;
     *originalOut = method_getImplementation(method);
     method_setImplementation(method, replacement);
+    PFLog(@"MTOP_HOOK_INSTALLED class=%@ selector=%@ types=%s",
+          NSStringFromClass(cls), NSStringFromSelector(selector),
+          method_getTypeEncoding(method) ?: "(unknown)");
     return YES;
 }
 
@@ -174,10 +390,20 @@ static void PFInstallGenericMtopObservationHooks(void) {
     if (mtopRequestClass) {
         installedAny |= PFReplaceMethod(mtopRequestClass, @selector(initWithApiName:version:),
                                         (IMP)PFHookedMtopRequestInit, (IMP *)&PFOriginalMtopRequestInit);
+        installedAny |= PFReplaceMethod(mtopRequestClass, @selector(initWithApiName:version:bizId:bizTopic:),
+                                        (IMP)PFHookedMtopRequestInitWithBiz, (IMP *)&PFOriginalMtopRequestInitWithBiz);
         installedAny |= PFReplaceMethod(mtopRequestClass, @selector(addParameter:forKey:),
                                         (IMP)PFHookedMtopRequestAddParameter, (IMP *)&PFOriginalMtopRequestAddParameter);
+        installedAny |= PFReplaceMethod(mtopRequestClass, @selector(addHttpParameter:forKey:),
+                                        (IMP)PFHookedMtopRequestAddHttpParameter, (IMP *)&PFOriginalMtopRequestAddHttpParameter);
+        installedAny |= PFReplaceMethod(mtopRequestClass, @selector(addHttpParameterNoneURLEncoding:forKey:),
+                                        (IMP)PFHookedMtopRequestAddHttpParameterNoneURLEncoding, (IMP *)&PFOriginalMtopRequestAddHttpParameterNoneURLEncoding);
+        installedAny |= PFReplaceMethod(mtopRequestClass, @selector(addHttpParameters:),
+                                        (IMP)PFHookedMtopRequestAddHttpParameters, (IMP *)&PFOriginalMtopRequestAddHttpParameters);
         installedAny |= PFReplaceMethod(mtopRequestClass, @selector(addParameters:),
                                         (IMP)PFHookedMtopRequestAddParameters, (IMP *)&PFOriginalMtopRequestAddParameters);
+        installedAny |= PFReplaceMethod(mtopRequestClass, @selector(generateMtopRequest),
+                                        (IMP)PFHookedMtopRequestGenerate, (IMP *)&PFOriginalMtopRequestGenerate);
         installedAny |= PFReplaceMethod(mtopRequestClass, @selector(response),
                                         (IMP)PFHookedMtopRequestResponse, (IMP *)&PFOriginalMtopRequestResponse);
     }
@@ -188,8 +414,14 @@ static void PFInstallGenericMtopObservationHooks(void) {
                                         (IMP)PFHookedMtopRequestInit, (IMP *)&PFOriginalApiRequestInit);
         installedAny |= PFReplaceMethod(apiRequestClass, @selector(addParameter:forKey:),
                                         (IMP)PFHookedMtopRequestAddParameter, (IMP *)&PFOriginalApiRequestAddParameter);
+        installedAny |= PFReplaceMethod(apiRequestClass, @selector(addHttpParameter:forKey:),
+                                        (IMP)PFHookedMtopRequestAddHttpParameter, (IMP *)&PFOriginalApiRequestAddHttpParameter);
+        installedAny |= PFReplaceMethod(apiRequestClass, @selector(addHttpParameters:),
+                                        (IMP)PFHookedMtopRequestAddHttpParameters, (IMP *)&PFOriginalApiRequestAddHttpParameters);
         installedAny |= PFReplaceMethod(apiRequestClass, @selector(addParameters:),
                                         (IMP)PFHookedMtopRequestAddParameters, (IMP *)&PFOriginalApiRequestAddParameters);
+        installedAny |= PFReplaceMethod(apiRequestClass, @selector(generateMtopRequest),
+                                        (IMP)PFHookedMtopRequestGenerate, (IMP *)&PFOriginalApiRequestGenerate);
         installedAny |= PFReplaceMethod(apiRequestClass, @selector(response),
                                         (IMP)PFHookedMtopRequestResponse, (IMP *)&PFOriginalApiRequestResponse);
     }
@@ -198,6 +430,8 @@ static void PFInstallGenericMtopObservationHooks(void) {
     if (bridgeClass) {
         installedAny |= PFReplaceMethod(bridgeClass, @selector(sendMtopRequest:callBack:ext:),
                                         (IMP)PFHookedMtopBridgeSend, (IMP *)&PFOriginalMtopBridgeSend);
+        installedAny |= PFReplaceMethod(bridgeClass, @selector(pending:request:delegate:),
+                                        (IMP)PFHookedMtopBridgePending, (IMP *)&PFOriginalMtopBridgePending);
     }
 
     Class delegateClass = NSClassFromString(@"MtopApiRequestDelegateImpl");
@@ -206,6 +440,8 @@ static void PFInstallGenericMtopObservationHooks(void) {
                                         (IMP)PFHookedMtopDelegateSuccess, (IMP *)&PFOriginalMtopDelegateSuccess);
         installedAny |= PFReplaceMethod(delegateClass, @selector(requestFailed:),
                                         (IMP)PFHookedMtopDelegateFailure, (IMP *)&PFOriginalMtopDelegateFailure);
+        installedAny |= PFReplaceMethod(delegateClass, @selector(didLoadCache:responseHeader:body:),
+                                        (IMP)PFHookedMtopDelegateDidLoadCache, (IMP *)&PFOriginalMtopDelegateDidLoadCache);
     }
 
     if (installedAny) {
@@ -218,7 +454,7 @@ static void PFInstallGenericMtopObservationHooks(void) {
     }
 }
 
-static BOOL PFRelevantClassName(NSString *name) {
+static BOOL PFRelevantClassName(NSString *name) {static BOOL PFRelevantClassName(NSString *name) {
     NSString *n = name.lowercaseString;
     return [n containsString:@"mtop"] ||
            [n containsString:@"xmodule"] ||
