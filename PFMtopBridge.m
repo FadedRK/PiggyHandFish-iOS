@@ -6,6 +6,81 @@
 
 static BOOL gPFMtopBridgeInstalled = NO;
 static BOOL gPFMtopBridgeObserversInstalled = NO;
+static BOOL gFMTablePageMtopHooksInstalled = NO;
+
+static id (*PFOriginalFMRequestApiName)(id, SEL);
+static id (*PFOriginalFMRequestApiParameter)(id, SEL, BOOL);
+static void (*PFOriginalFMHandleResponse)(id, SEL, BOOL, id, id, id, BOOL, BOOL);
+
+static NSString *PFObjectClassName(id object) {
+    return object ? NSStringFromClass([object class]) : @"(nil)";
+}
+
+static NSString *PFDictionaryKeysDescription(id object) {
+    if (![object isKindOfClass:[NSDictionary class]]) {
+        return PFObjectClassName(object);
+    }
+    NSArray *keys = [[(NSDictionary *)object allKeys] valueForKey:@"description"];
+    return [NSString stringWithFormat:@"%@ keys=%@", PFObjectClassName(object), keys ?: @[]];
+}
+
+static id PFHookedFMRequestApiName(id self, SEL _cmd) {
+    id result = PFOriginalFMRequestApiName ? PFOriginalFMRequestApiName(self, _cmd) : nil;
+    PFLog(@"MTOP_OBSERVED_REQUEST_API_NAME class=%@ api=%@",
+          NSStringFromClass([self class]), result ?: @"(nil)");
+    return result;
+}
+
+static id PFHookedFMRequestApiParameter(id self, SEL _cmd, BOOL isPrefetch) {
+    id result = PFOriginalFMRequestApiParameter ? PFOriginalFMRequestApiParameter(self, _cmd, isPrefetch) : nil;
+    PFLog(@"MTOP_OBSERVED_REQUEST_API_PARAM class=%@ prefetch=%d param=%@",
+          NSStringFromClass([self class]), isPrefetch, PFDictionaryKeysDescription(result));
+    return result;
+}
+
+static void PFHookedFMHandleResponse(id self, SEL _cmd, BOOL success, id data, id error, id requestModel, BOOL refresh, BOOL atLaunch) {
+    PFLog(@"MTOP_OBSERVED_RESPONSE class=%@ success=%d data=%@ errorClass=%@ requestClass=%@ refresh=%d atLaunch=%d",
+          NSStringFromClass([self class]),
+          success,
+          PFDictionaryKeysDescription(data),
+          PFObjectClassName(error),
+          PFObjectClassName(requestModel),
+          refresh,
+          atLaunch);
+
+    if (PFOriginalFMHandleResponse) {
+        PFOriginalFMHandleResponse(self, _cmd, success, data, error, requestModel, refresh, atLaunch);
+    }
+}
+
+static void PFInstallFMTablePageMtopHooks(void) {
+    if (gFMTablePageMtopHooksInstalled) return;
+
+    Class cls = NSClassFromString(@"FMTablePageMtop");
+    if (!cls) return;
+
+    Method nameMethod = class_getInstanceMethod(cls, @selector(requestApiName));
+    Method paramMethod = class_getInstanceMethod(cls, @selector(requestApiParameter:));
+    Method responseMethod = class_getInstanceMethod(cls, @selector(_handleResponseResultWithSuccess:data:error:mtopRequestModel:refresh:atLaunch:));
+
+    if (!nameMethod || !paramMethod || !responseMethod) {
+        PFLog(@"MTOP_FM_TABLE_HOOK_WAIT class=%@ name=%d param=%d response=%d",
+              NSStringFromClass(cls), nameMethod != NULL, paramMethod != NULL, responseMethod != NULL);
+        return;
+    }
+
+    PFOriginalFMRequestApiName = (id (*)(id, SEL))method_getImplementation(nameMethod);
+    method_setImplementation(nameMethod, (IMP)PFHookedFMRequestApiName);
+
+    PFOriginalFMRequestApiParameter = (id (*)(id, SEL, BOOL))method_getImplementation(paramMethod);
+    method_setImplementation(paramMethod, (IMP)PFHookedFMRequestApiParameter);
+
+    PFOriginalFMHandleResponse = (void (*)(id, SEL, BOOL, id, id, id, BOOL, BOOL))method_getImplementation(responseMethod);
+    method_setImplementation(responseMethod, (IMP)PFHookedFMHandleResponse);
+
+    gFMTablePageMtopHooksInstalled = YES;
+    PFLog(@"MTOP_FM_TABLE_HOOK_INSTALLED class=%@ selectors=requestApiName,requestApiParameter:,_handleResponseResultWithSuccess:data:error:mtopRequestModel:refresh:atLaunch:", NSStringFromClass(cls));
+}
 
 static BOOL PFRelevantClassName(NSString *name) {
     NSString *n = name.lowercaseString;
@@ -105,6 +180,8 @@ static void PFScanMtopClasses(NSString *reason) {
         free(methods);
     }
 
+    PFInstallFMTablePageMtopHooks();
+
     PFLog(@"MTOP_NATIVE_SCAN_DONE reason=%@ totalClasses=%d matched=%lu methodLines=%lu",
           reason,
           count,
@@ -138,8 +215,8 @@ void PFInstallMtopBridge(void) {
     if (gPFMtopBridgeInstalled) return;
     gPFMtopBridgeInstalled = YES;
 
-    PFLog(@"MTOP_NATIVE_BRIDGE installing read-only delayed runtime discovery");
+    PFLog(@"MTOP_NATIVE_BRIDGE installing read-only FMTablePageMtop observation");
     PFScanMtopClasses(@"startup");
     PFInstallDelayedScans();
-    PFLog(@"MTOP_NATIVE_BRIDGE installed; no requests are created, modified, replayed, or intercepted");
+    PFLog(@"MTOP_NATIVE_BRIDGE installed; request observation is read-only and does not create, modify, replay, or intercept requests");
 }
