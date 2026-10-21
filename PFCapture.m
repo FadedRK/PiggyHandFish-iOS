@@ -604,22 +604,26 @@ static NSString *PFCaptureRecentLogText(void) {
 }
 
 static void PFCaptureExportLog(UIButton *sender) {
-    UIViewController *presenter = PFCaptureTopController();
-    if (!presenter || presenter.presentedViewController) {
-        PFCaptureLog(@"EXPORT_SKIP no available presenter");
-        return;
-    }
-    NSURL *fileURL = [NSURL fileURLWithPath:PFCaptureLogPath()];
-    UIActivityViewController *activity =
-        [[UIActivityViewController alloc] initWithActivityItems:@[fileURL]
-                                          applicationActivities:nil];
-    UIPopoverPresentationController *popover = activity.popoverPresentationController;
-    if (popover) {
-        popover.sourceView = sender ?: presenter.view;
-        popover.sourceRect = sender ? sender.bounds : presenter.view.bounds;
-        popover.permittedArrowDirections = UIPopoverArrowDirectionAny;
-    }
-    [presenter presentViewController:activity animated:YES completion:nil];
+    // Let the action sheet dismiss before presenting the system share sheet.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UIViewController *presenter = PFCaptureTopController();
+        if (!presenter || presenter.presentedViewController) {
+            PFCaptureLog(@"EXPORT_SKIP no available presenter");
+            return;
+        }
+        NSURL *fileURL = [NSURL fileURLWithPath:PFCaptureLogPath()];
+        UIActivityViewController *activity =
+            [[UIActivityViewController alloc] initWithActivityItems:@[fileURL]
+                                              applicationActivities:nil];
+        UIPopoverPresentationController *popover = activity.popoverPresentationController;
+        if (popover) {
+            popover.sourceView = sender ?: presenter.view;
+            popover.sourceRect = sender ? sender.bounds : presenter.view.bounds;
+            popover.permittedArrowDirections = UIPopoverArrowDirectionAny;
+        }
+        [presenter presentViewController:activity animated:YES completion:nil];
+    });
 }
 
 static void PFCaptureShowMenu(UIButton *sender) {
@@ -641,12 +645,15 @@ static void PFCaptureShowMenu(UIButton *sender) {
                                              handler:^(__unused UIAlertAction *action) {
         UIPasteboard.generalPasteboard.string = PFCaptureRecentLogText();
         PFCaptureLog(@"RECENT_LOG_COPIED");
-        UIAlertController *done = [UIAlertController alertControllerWithTitle:@"已复制"
-                                                                       message:@"最近的抓取日志已复制，可粘贴到聊天中。"
-                                                                preferredStyle:UIAlertControllerStyleAlert];
-        [done addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        UIViewController *top = PFCaptureTopController();
-        if (top && !top.presentedViewController) [top presentViewController:done animated:YES completion:nil];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            UIAlertController *done = [UIAlertController alertControllerWithTitle:@"已复制"
+                                                                           message:@"最近的抓取日志已复制，可粘贴到聊天中。"
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [done addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            UIViewController *top = PFCaptureTopController();
+            if (top && !top.presentedViewController) [top presentViewController:done animated:YES completion:nil];
+        });
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
 
