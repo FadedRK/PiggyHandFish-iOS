@@ -1,4 +1,4 @@
-name: Build iOS dylibs
+name: Build PiggyHandFish settings entry and diagnostics
 
 on:
   push:
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build capture and load-probe dylibs
+    name: Build plugin, capture, and load-probe dylibs
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -63,10 +63,11 @@ jobs:
             test -s "$output"
           }
 
+          build_universal PiggyHandFish dist/PiggyHandFish.dylib
           build_universal PiggyHandFishCapture dist/PiggyHandFish-Capture.dylib
           build_universal PiggyHandFishProbe dist/PiggyHandFish-LoadProbe.dylib
 
-          shasum -a 256 dist/PiggyHandFish-Capture.dylib dist/PiggyHandFish-LoadProbe.dylib | tee dist/SHA256SUMS.txt
+          shasum -a 256 dist/PiggyHandFish.dylib dist/PiggyHandFish-Capture.dylib dist/PiggyHandFish-LoadProbe.dylib | tee dist/SHA256SUMS.txt
           ls -lh dist
 
       - name: Upload diagnostic artifacts
@@ -74,6 +75,7 @@ jobs:
         with:
           name: PiggyHandFish-Diagnostics-${{ github.sha }}
           path: |
+            dist/PiggyHandFish.dylib
             dist/PiggyHandFish-Capture.dylib
             dist/PiggyHandFish-LoadProbe.dylib
             dist/SHA256SUMS.txt
