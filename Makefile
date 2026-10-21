@@ -5,7 +5,7 @@ INSTALL_TARGET_PROCESSES =
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME := PiggyHandFish
-PiggyHandFish_FILES := PFMain.m PFConfig.m PFLogger.m PFScout.m PFPluginEntry.m PFAction.m
+PiggyHandFish_FILES := PFMain.m PFConfig.m PFLogger.m PFScout.m PFPluginEntry.m PFAction.m PFCapture.m
 PiggyHandFish_CFLAGS := -fobjc-arc -Wall
 PiggyHandFish_FRAMEWORKS := Foundation UIKit
 PiggyHandFish_LDFLAGS := -install_name @rpath/PiggyHandFish.dylib
