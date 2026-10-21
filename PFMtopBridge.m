@@ -1,5 +1,7 @@
 #import "PFMtopBridge.h"
 #import "PFLogger.h"
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
 static BOOL gPFMtopBridgeInstalled = NO;
@@ -81,8 +83,6 @@ static void PFScanMtopClasses(NSString *reason) {
         free(methods);
     }
 
-    // These are useful anchors even when the app's own MTOP classes use
-    // obfuscated names. We only inspect metadata; no method is replaced.
     for (NSString *anchor in @[
         @"NSURLSession", @"NSURLSessionTask", @"NSURLProtocol", @"NSURLConnection"
     ]) {
