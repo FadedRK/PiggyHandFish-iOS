@@ -432,9 +432,13 @@ static NSString *PFRouteStringDepth(id route, NSUInteger depth) {
             id value = [route valueForKey:key];
             if (value && value != route) {
                 NSString *candidate = PFRouteStringDepth(value, depth + 1);
+                NSString *lowerCandidate = candidate.lowercaseString;
                 if (candidate.length &&
-                    ([candidate.lowercaseString containsString:@"fleamarket://"] ||
-                     [candidate.lowercaseString containsString:@"flutter_settings"])) {
+                    ([lowerCandidate containsString:@"fleamarket://"] ||
+                     [lowerCandidate containsString:@"flutter_settings"] ||
+                     [lowerCandidate containsString:@"http://"] ||
+                     [lowerCandidate containsString:@"https://"] ||
+                     [lowerCandidate containsString:@"personal-setting"])) {
                     return candidate;
                 }
             }
@@ -585,6 +589,13 @@ static void PFHandleSettingsRoute(id urlObject) {
     NSString *route = PFRouteString(urlObject);
     NSString *lowerRoute = route.lowercaseString;
     if (!route.length) return;
+
+    if ([lowerRoute containsString:@"idlefish-f2e"] ||
+        [lowerRoute containsString:@"personal-setting"] ||
+        [lowerRoute containsString:@"flutter_settings"]) {
+        PFLog(@"SETTINGS_ROUTE_PROBE objectClass=%@ route=%@",
+              urlObject ? NSStringFromClass([urlObject class]) : @"(nil)", route);
+    }
 
     if ([lowerRoute containsString:@"fleamarket://flutter_settings"]) {
         PFLog(@"Confirmed Flutter Settings container route: %@", route);
