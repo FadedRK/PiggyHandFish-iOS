@@ -22,6 +22,8 @@ static IMP gFlutterRouterPopRouteOriginal = NULL;
 static IMP gFlutterRouterRemoveRouteOriginal = NULL;
 static IMP gNavigationPushOriginal = NULL;
 static IMP gViewControllerPresentOriginal = NULL;
+static IMP gViewControllerDidAppearOriginal = NULL;
+static IMP gXFlutterViewControllerDidAppearOriginal = NULL;
 static IMP gUIApplicationOpenURLOriginal = NULL;
 static IMP gUIApplicationOpenURLLegacyOriginal = NULL;
 static IMP gMethodChannelInitOriginal = NULL;
@@ -951,6 +953,45 @@ static void PFCaptureViewControllerPresent(id self, SEL cmd, UIViewController *v
     }
 }
 
+
+static void PFCaptureLogControllerAppearance(UIViewController *controller, NSString *source) {
+    if (!controller) return;
+    NSString *className = NSStringFromClass(controller.class);
+    NSString *title = controller.navigationItem.title ?: controller.title ?: @"";
+    NSString *route = PFCaptureRouteSummary(controller);
+    NSString *lowerClass = className.lowercaseString;
+    NSString *lowerTitle = title.lowercaseString;
+    BOOL interesting = PFCaptureInterestingController(controller) ||
+        [lowerTitle containsString:@"setting"] ||
+        [title containsString:@"设置"] ||
+        [title containsString:@"设定"] ||
+        route.length > 0 ||
+        [lowerClass containsString:@"home"];
+    if (!interesting) return;
+
+    PFCaptureLog(@"CONTROLLER_APPEAR source=%@ class=%@ title=%@ route=%@",
+                 source, className, title.length ? title : @"(no title)",
+                 route.length ? route : @"(no route properties found)");
+}
+
+static void PFCaptureViewControllerDidAppear(id self, SEL cmd, BOOL animated) {
+    if (gViewControllerDidAppearOriginal) {
+        ((void (*)(id, SEL, BOOL))gViewControllerDidAppearOriginal)(self, cmd, animated);
+    }
+    if ([self isKindOfClass:UIViewController.class]) {
+        PFCaptureLogControllerAppearance((UIViewController *)self, @"UIViewController.viewDidAppear:");
+    }
+}
+
+static void PFCaptureXFlutterViewControllerDidAppear(id self, SEL cmd, BOOL animated) {
+    if (gXFlutterViewControllerDidAppearOriginal) {
+        ((void (*)(id, SEL, BOOL))gXFlutterViewControllerDidAppearOriginal)(self, cmd, animated);
+    }
+    if ([self isKindOfClass:UIViewController.class]) {
+        PFCaptureLogControllerAppearance((UIViewController *)self, @"XFlutterViewController.viewDidAppear:");
+    }
+}
+
 static void PFCaptureInstallHooks(void) {
     Class router = NSClassFromString(@"FMURLRouter");
     if (router) {
@@ -1069,6 +1110,27 @@ static void PFCaptureInstallHooks(void) {
     }
 
     Class viewControllerClass = UIViewController.class;
+    SEL didAppearSelector = sel_registerName("viewDidAppear:");
+    Method didAppearMethod = class_getInstanceMethod(viewControllerClass, didAppearSelector);
+    if (didAppearMethod && method_getNumberOfArguments(didAppearMethod) == 3 &&
+        PFCaptureIsVoidMethod(didAppearMethod)) {
+        PFCaptureInstallHook(viewControllerClass, didAppearSelector, NO,
+                             (IMP)PFCaptureViewControllerDidAppear,
+                             &gViewControllerDidAppearOriginal, 3, 'v');
+    }
+
+    Class xFlutterControllerClass = NSClassFromString(@"XFlutterViewController");
+    Method xFlutterDidAppearMethod = xFlutterControllerClass
+        ? class_getInstanceMethod(xFlutterControllerClass, didAppearSelector) : NULL;
+    if (xFlutterControllerClass && xFlutterDidAppearMethod &&
+        method_getNumberOfArguments(xFlutterDidAppearMethod) == 3 &&
+        PFCaptureIsVoidMethod(xFlutterDidAppearMethod) &&
+        PFCaptureClassOwnsSelector(xFlutterControllerClass, didAppearSelector, NO)) {
+        PFCaptureInstallHook(xFlutterControllerClass, didAppearSelector, NO,
+                             (IMP)PFCaptureXFlutterViewControllerDidAppear,
+                             &gXFlutterViewControllerDidAppearOriginal, 3, 'v');
+    }
+
     SEL presentSelector = sel_registerName("presentViewController:animated:completion:");
     Method presentMethod = class_getInstanceMethod(viewControllerClass, presentSelector);
     if (presentMethod && method_getNumberOfArguments(presentMethod) == 5 &&
