@@ -494,110 +494,131 @@ static UIViewController *PFActiveTopViewController(void) {
     return controller;
 }
 
-static void PFSettingsRouteOverlayAttempt(NSUInteger remainingAttempts) {
+static BOOL PFSettingsHomeRoutePendingForController(UIViewController *controller) {
+    if (!controller) return NO;
+
+    NSString *className = NSStringFromClass(controller.class).lowercaseString;
+    if (![className containsString:@"fmwebviewcontroller"]) return NO;
+
+    @synchronized ([PFPluginEntryManager class]) {
+        if (!PFSettingsHomeRouteObservedAt) return NO;
+        NSTimeInterval age = [[NSDate date] timeIntervalSinceDate:PFSettingsHomeRouteObservedAt];
+        if (age < 0 || age > 15.0) {
+            PFSettingsHomeRouteObservedAt = nil;
+            PFSettingsHomeRouteObservedURL = nil;
+            return NO;
+        }
+
+        PFLog(@"Settings route/controller matched: %@ -> %@",
+              PFSettingsHomeRouteObservedURL ?: @"(unknown route)", className);
+        PFSettingsHomeRouteObservedAt = nil;
+        PFSettingsHomeRouteObservedURL = nil;
+        return YES;
+    }
+}
+
+static void PFSettingsPageRetry(NSUInteger remainingAttempts) {
     UIViewController *target = PFActiveTopViewController();
-    if (target && target.isViewLoaded && target.view.window) {
-        [[PFPluginEntryManager shared] installRouteEntryOverlayOnController:target];
+    if (target && target.isViewLoaded && target.view.window &&
+        PFSettingsHomeRoutePendingForController(target)) {
+        [[PFPluginEntryManager shared] settingsControllerDidAppear:target];
         return;
     }
 
     if (remainingAttempts == 0) {
-        PFLog(@"Could not attach Settings route overlay: no visible view controller was found.");
+        PFLog(@"Settings H5 route observed, but no matching FMWebViewController appeared during the retry window.");
         return;
     }
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        PFSettingsRouteOverlayAttempt(remainingAttempts - 1);
+        PFSettingsPageRetry(remainingAttempts - 1);
     });
 }
 
 static void PFHandleSettingsRoute(id urlObject) {
     NSString *route = PFRouteString(urlObject);
     NSString *lowerRoute = route.lowercaseString;
-    BOOL isSettingsRoute =
-        [lowerRoute containsString:@"fleamarket://flutter_settings"] ||
-        [lowerRoute containsString:@"flutter_settings"];
+    if (!route.length) return;
 
-    if (isSettingsRoute) {
-        PFLog(@"Detected Xianyu Flutter Settings route from FMURLRouter: %@", route);
-        // Flutter may change its page without presenting a new native UIViewController.
-        // A native overlay button works even when the page itself has no UINavigationBar.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            PFSettingsRouteOverlayAttempt(16);
-        });
-    } else if (route.length &&
-               ([lowerRoute containsString:@"fleamarket://"] ||
-                [lowerRoute containsString:@"http://"] ||
-                [lowerRoute containsString:@"https://"])) {
+    if ([lowerRoute containsString:@"fleamarket://flutter_settings"]) {
+        PFLog(@"Confirmed Flutter Settings container route: %@", route);
+        return;
+    }
+
+    // Captured runtime logs show that this exact H5 page is opened by
+    // FMURLRouter and presented as FMWebViewController. Add the native bar
+    // button to that controller, following the proven ZolaCN viewDidAppear pattern.
+    BOOL isSettingsHome =
+        [lowerRoute containsString:@"/idlefish-f2e/idle-personal-setting/home.html"] ||
+        [lowerRoute containsString:@"/idlefish-f2e/idle-personal-setting/"];
+    if (isSettingsHome) {
+        @synchronized ([PFPluginEntryManager class]) {
+            PFSettingsHomeRouteObservedAt = [NSDate date];
+            PFSettingsHomeRouteObservedURL = route;
+        }
+        PFLog(@"Confirmed Xianyu personal-settings H5 route: %@", route);
         dispatch_async(dispatch_get_main_queue(), ^{
-            [[PFPluginEntryManager shared] removeRouteEntryOverlay];
+            PFSettingsPageRetry(32);
         });
-    } else {
-        PFLog(@"FMURLRouter URL argument could not be resolved to a route (class=%@).",
-              urlObject ? NSStringFromClass([urlObject class]) : @"(nil)");
     }
 }
 
-static NSString * const PFFMURLRouterOpenAliasName =
-    @"pfh_original_openURL:withQuery:withParams:";
+static NSString * const PFFMURLRouterPreProcessAliasName =
+    @"pfh_original_preProcessURL:";
 
-static BOOL PFFMURLRouterOpenURL(id self, SEL command, id url, id query, id params) {
-    SEL alias = NSSelectorFromString(PFFMURLRouterOpenAliasName);
-    BOOL (*original)(id, SEL, id, id, id) =
-        (BOOL (*)(id, SEL, id, id, id))[self methodForSelector:alias];
-    BOOL result = original ? original(self, alias, url, query, params) : NO;
+static id PFFMURLRouterPreProcessURL(id self, SEL command, id url) {
+    SEL alias = NSSelectorFromString(PFFMURLRouterPreProcessAliasName);
+    id (*original)(id, SEL, id) =
+        (id (*)(id, SEL, id))[self methodForSelector:alias];
+    id result = original ? original(self, alias, url) : url;
     PFHandleSettingsRoute(url);
     return result;
 }
 
 static BOOL PFInstallFMURLRouterHook(void) {
     Class routerClass = NSClassFromString(@"FMURLRouter");
-    SEL selector = sel_registerName("openURL:withQuery:withParams:");
-    SEL alias = NSSelectorFromString(PFFMURLRouterOpenAliasName);
+    SEL selector = sel_registerName("preProcessURL:");
+    SEL alias = NSSelectorFromString(PFFMURLRouterPreProcessAliasName);
     Method method = routerClass ? class_getInstanceMethod(routerClass, selector) : NULL;
 
     if (!routerClass || !method) {
-        PFLog(@"FMURLRouter route hook unavailable (class=%@ method=%@).",
+        PFLog(@"FMURLRouter preProcessURL hook unavailable (class=%@ method=%@).",
               routerClass ? @"found" : @"missing",
               method ? @"found" : @"missing");
         return NO;
     }
 
-    if (method_getNumberOfArguments(method) != 5) {
-        PFLog(@"FMURLRouter openURL hook skipped: unexpected argument count %u.",
+    if (method_getNumberOfArguments(method) != 3) {
+        PFLog(@"FMURLRouter preProcessURL hook skipped: unexpected argument count %u.",
               method_getNumberOfArguments(method));
         return NO;
     }
 
     char *returnType = method_copyReturnType(method);
-    BOOL returnsBoolean = returnType &&
-        (returnType[0] == 'B' || returnType[0] == 'c' || returnType[0] == 'C');
+    BOOL returnsObject = returnType && returnType[0] == '@';
     free(returnType);
-    if (!returnsBoolean) {
-        PFLog(@"FMURLRouter openURL hook skipped: unexpected return type.");
+    if (!returnsObject) {
+        PFLog(@"FMURLRouter preProcessURL hook skipped: unexpected return type.");
         return NO;
     }
 
-    for (unsigned int index = 2; index <= 4; index++) {
-        char *type = method_copyArgumentType(method, index);
-        BOOL isObject = type && (type[0] == '@' || type[0] == '#');
-        free(type);
-        if (!isObject) {
-            PFLog(@"FMURLRouter openURL hook skipped: argument %u is not an object.", index);
-            return NO;
-        }
+    char *argumentType = method_copyArgumentType(method, 2);
+    BOOL argumentIsObject = argumentType && (argumentType[0] == '@' || argumentType[0] == '#');
+    free(argumentType);
+    if (!argumentIsObject) {
+        PFLog(@"FMURLRouter preProcessURL hook skipped: URL argument is not an object.");
+        return NO;
     }
 
     if (!class_addMethod(routerClass, alias, method_getImplementation(method),
                          method_getTypeEncoding(method))) {
-        PFLog(@"FMURLRouter openURL hook skipped: alias already exists.");
+        PFLog(@"FMURLRouter preProcessURL hook skipped: alias already exists.");
         return NO;
     }
 
-    method_setImplementation(method, (IMP)PFFMURLRouterOpenURL);
-    PFLog(@"Installed route hook on confirmed Runner class FMURLRouter openURL:withQuery:withParams:.");
+    method_setImplementation(method, (IMP)PFFMURLRouterPreProcessURL);
+    PFLog(@"Installed route hook on actual Runner selector FMURLRouter preProcessURL:.");
     return YES;
 }
 
@@ -621,7 +642,7 @@ static void PFInstallSettingsHook(void) {
 
         BOOL routeHookInstalled = PFInstallFMURLRouterHook();
         if (!routeHookInstalled) {
-            PFLog(@"The exact FMURLRouter hook was not installed; only native title/class fallback remains.");
+            PFLog(@"The FMURLRouter preProcessURL hook was not installed; only native title/class fallback remains.");
         }
     });
 }
