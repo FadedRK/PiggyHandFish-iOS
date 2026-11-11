@@ -40,31 +40,45 @@ static char PFRequestAPIKey;
 static char PFRequestVersionKey;
 static char PFRequestSceneIDKey;
 static char PFRequestDeliveryIDKey;
-static char PFRequestHasImplIDKey;
+static char PFRequestImplIDKey;
 
-// Process-local anonymized labels. Canonical identifiers are retained only in
-// process memory for equality matching and are never emitted to logs or saved.
+// Process-local anonymized labels. Canonical identifiers remain in memory only
+// for equality matching and are never emitted to logs or persisted.
 static os_unfair_lock gPFTaskCorrelationLock = OS_UNFAIR_LOCK_INIT;
 static NSMutableDictionary<NSString *, NSString *> *gPFSceneRefMap;
 static NSMutableDictionary<NSString *, NSString *> *gPFTaskRefMap;
+static NSMutableDictionary<NSString *, NSString *> *gPFImplRefMap;
 static NSUInteger gPFSceneRefSequence = 0;
 static NSUInteger gPFTaskRefSequence = 0;
+static NSUInteger gPFImplRefSequence = 0;
 
-// Normalize NSNumber and NSString IDs to the same in-memory representation.
-// This supports e.g. @(12345) and @"12345" without exposing the identifier.
+// Normalize NSNumber and NSString identifiers into the same in-memory key.
 static NSString *PFCanonicalTaskIdentifier(id rawValue) {
+    NSString *value = nil;
     if ([rawValue isKindOfClass:[NSNumber class]]) {
-        NSString *value = [(NSNumber *)rawValue stringValue];
-        return (value.length > 0 && value.length <= 128) ? value : nil;
+        value = [(NSNumber *)rawValue stringValue];
+    } else if ([rawValue isKindOfClass:[NSString class]]) {
+        value = [(NSString *)rawValue stringByTrimmingCharactersInSet:
+                 [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    } else {
+        return nil;
     }
-    if ([rawValue isKindOfClass:[NSString class]]) {
-        NSString *value = [(NSString *)rawValue stringByTrimmingCharactersInSet:
-                           [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (value.length == 0 || value.length > 128) return nil;
-        if ([value rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location != NSNotFound) return nil;
-        return value;
+    if (value.length == 0 || value.length > 128) return nil;
+    if ([value rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location != NSNotFound) return nil;
+
+    // Normalize all-digit strings so @"00123" and @(123) share a key, while
+    // leaving opaque alphanumeric implementation identifiers unchanged.
+    BOOL digitsOnly = YES;
+    for (NSUInteger i = 0; i < value.length; i++) {
+        unichar ch = [value characterAtIndex:i];
+        if (ch < '0' || ch > '9') { digitsOnly = NO; break; }
     }
-    return nil;
+    if (digitsOnly) {
+        NSUInteger first = 0;
+        while (first + 1 < value.length && [value characterAtIndex:first] == '0') first++;
+        value = [value substringFromIndex:first];
+    }
+    return value;
 }
 
 static BOOL PFIsTaskCorrelationRequest(id request) {
@@ -82,17 +96,21 @@ static NSString *PFTaskCorrelationForRequest(id request) {
         objc_getAssociatedObject(request, &PFRequestSceneIDKey));
     NSString *deliveryKey = PFCanonicalTaskIdentifier(
         objc_getAssociatedObject(request, &PFRequestDeliveryIDKey));
+    NSString *implKey = PFCanonicalTaskIdentifier(
+        objc_getAssociatedObject(request, &PFRequestImplIDKey));
     BOOL hasScene = sceneKey.length > 0;
     BOOL hasDelivery = deliveryKey.length > 0;
-    BOOL hasImplID = [objc_getAssociatedObject(request, &PFRequestHasImplIDKey) boolValue];
-    if (!hasScene && !hasDelivery) return nil;
+    BOOL hasImpl = implKey.length > 0;
+    if (!hasScene && !hasDelivery && !hasImpl) return nil;
 
     NSString *sceneTag = @"(none)";
     NSString *taskTag = @"(none)";
+    NSString *implTag = @"(none)";
 
     os_unfair_lock_lock(&gPFTaskCorrelationLock);
     if (!gPFSceneRefMap) gPFSceneRefMap = [NSMutableDictionary dictionary];
     if (!gPFTaskRefMap) gPFTaskRefMap = [NSMutableDictionary dictionary];
+    if (!gPFImplRefMap) gPFImplRefMap = [NSMutableDictionary dictionary];
 
     if (hasScene) {
         sceneTag = gPFSceneRefMap[sceneKey];
@@ -101,20 +119,30 @@ static NSString *PFTaskCorrelationForRequest(id request) {
             gPFSceneRefMap[sceneKey] = sceneTag;
         }
     }
+    NSString *sceneComponent = hasScene ? sceneKey : @"(no-scene)";
     if (hasDelivery) {
-        // Scope delivery IDs by canonical scene ID to avoid collisions across scenes.
-        NSString *sceneComponent = hasScene ? sceneKey : @"(no-scene)";
-        NSString *compoundKey = [NSString stringWithFormat:@"%@|%@", sceneComponent, deliveryKey];
-        taskTag = gPFTaskRefMap[compoundKey];
+        NSString *taskMapKey = [NSString stringWithFormat:@"%@|%@", sceneComponent, deliveryKey];
+        taskTag = gPFTaskRefMap[taskMapKey];
         if (!taskTag) {
             taskTag = [NSString stringWithFormat:@"T%03lu", (unsigned long)(++gPFTaskRefSequence)];
-            gPFTaskRefMap[compoundKey] = taskTag;
+            gPFTaskRefMap[taskMapKey] = taskTag;
+        }
+    }
+    if (hasImpl) {
+        // Scope implRef by scene + delivery so unrelated implementations in
+        // another task cannot collide or be mistaken for this task's item.
+        NSString *implMapKey = [NSString stringWithFormat:@"%@|%@|%@", sceneComponent,
+                                hasDelivery ? deliveryKey : @"(no-delivery)", implKey];
+        implTag = gPFImplRefMap[implMapKey];
+        if (!implTag) {
+            implTag = [NSString stringWithFormat:@"I%03lu", (unsigned long)(++gPFImplRefSequence)];
+            gPFImplRefMap[implMapKey] = implTag;
         }
     }
     os_unfair_lock_unlock(&gPFTaskCorrelationLock);
 
-    NSString *base = [NSString stringWithFormat:@"sceneRef=%@ taskRef=%@", sceneTag, taskTag];
-    return hasImplID ? [base stringByAppendingString:@" hasImplId=1"] : base;
+    return [NSString stringWithFormat:@"sceneRef=%@ taskRef=%@ implRef=%@",
+            sceneTag, taskTag, implTag];
 }
 
 static void PFObserveTaskCorrelationParameter(id request, id key, id value) {
@@ -126,8 +154,9 @@ static void PFObserveTaskCorrelationParameter(id request, id key, id value) {
     } else if ([keyString isEqualToString:@"deliveryId"]) {
         NSString *canonical = PFCanonicalTaskIdentifier(value);
         if (canonical) objc_setAssociatedObject(request, &PFRequestDeliveryIDKey, canonical, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    } else if ([keyString isEqualToString:@"implId"] && value && value != [NSNull null]) {
-        objc_setAssociatedObject(request, &PFRequestHasImplIDKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else if ([keyString isEqualToString:@"implId"]) {
+        NSString *canonical = PFCanonicalTaskIdentifier(value);
+        if (canonical) objc_setAssociatedObject(request, &PFRequestImplIDKey, canonical, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
 
@@ -136,9 +165,7 @@ static void PFObserveTaskCorrelationParameters(id request, id parameters) {
     NSDictionary *dictionary = (NSDictionary *)parameters;
     PFObserveTaskCorrelationParameter(request, @"sceneId", dictionary[@"sceneId"]);
     PFObserveTaskCorrelationParameter(request, @"deliveryId", dictionary[@"deliveryId"]);
-    if ([dictionary.allKeys containsObject:@"implId"]) {
-        PFObserveTaskCorrelationParameter(request, @"implId", dictionary[@"implId"]);
-    }
+    PFObserveTaskCorrelationParameter(request, @"implId", dictionary[@"implId"]);
 }
 
 // Privacy-safe request/response logging: retain field names and value shapes,
@@ -307,6 +334,143 @@ static NSString *PFRequestTraceMetadata(id request) {
             PFElapsedSinceRequestInit(request), correlation ?: @""];
 }
 
+static BOOL PFIsTaskDigestAPI(NSString *apiName) {
+    if (![apiName isKindOfClass:[NSString class]]) return NO;
+    NSString *api = apiName.lowercaseString;
+    return [api hasPrefix:@"mtop.taobao.idle.task."] ||
+           [api isEqualToString:@"mtop.taobao.pentaprism.scene.trigger"];
+}
+
+static BOOL PFIsApprovedTaskStatusKey(NSString *key) {
+    static NSSet<NSString *> *approvedKeys;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        approvedKeys = [NSSet setWithArray:@[
+            @"times", @"maxtimes", @"idletaskstatus", @"taskstatus", @"taskstate",
+            @"status", @"state", @"benefitstatus", @"rewardstatus", @"claimed",
+            @"isclaimed", @"completed", @"iscompleted", @"finished", @"isfinished",
+            @"success", @"issuccess", @"valid", @"isvalid", @"progress",
+            @"currentprogress", @"maxprogress", @"step", @"steps", @"count",
+            @"currentcount", @"maxcount", @"retcode", @"errcode", @"errorcode",
+            @"resultcode", @"statuscode"
+        ]];
+    });
+    return [key isKindOfClass:[NSString class]] && [approvedKeys containsObject:key.lowercaseString];
+}
+
+static BOOL PFIsSafeTaskPathSegment(NSString *key) {
+    if (![key isKindOfClass:[NSString class]] || key.length == 0 || key.length > 48) return NO;
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+                               @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"];
+    if ([key rangeOfCharacterFromSet:allowed.invertedSet].location != NSNotFound) return NO;
+    NSString *lower = key.lowercaseString;
+    NSArray<NSString *> *blocked = @[@"url", @"token", @"cookie", @"phone", @"mobile",
+                                     @"nickname", @"title", @"name", @"account", @"user"];
+    for (NSString *term in blocked) if ([lower containsString:term]) return NO;
+    return YES;
+}
+
+static BOOL PFIsSafeTaskEnumString(NSString *value) {
+    if (![value isKindOfClass:[NSString class]] || value.length == 0 || value.length > 48) return NO;
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+                               @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-"];
+    return [value rangeOfCharacterFromSet:allowed.invertedSet].location == NSNotFound;
+}
+
+static void PFCollectTaskProgressDigest(id object, NSString *prefix,
+                                        NSUInteger depth, NSMutableArray<NSString *> *items) {
+    if (!object || depth > 3 || items.count >= 48) return;
+
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dictionary = (NSDictionary *)object;
+        NSMutableArray<NSString *> *keys = [NSMutableArray array];
+        for (id key in dictionary.allKeys) {
+            if ([key isKindOfClass:[NSString class]] && PFIsSafeTaskPathSegment(key)) {
+                [keys addObject:key];
+            }
+        }
+        [keys sortUsingSelector:@selector(compare:)];
+        for (NSString *key in keys) {
+            if (items.count >= 48) break;
+            id value = dictionary[key];
+            NSString *path = prefix.length ? [NSString stringWithFormat:@"%@.%@", prefix, key] : key;
+            if (PFIsApprovedTaskStatusKey(key)) {
+                if ([value isKindOfClass:[NSNumber class]]) {
+                    [items addObject:[NSString stringWithFormat:@"%@=%@", path, [(NSNumber *)value stringValue]]];
+                } else if ([value isKindOfClass:[NSString class]] && PFIsSafeTaskEnumString(value)) {
+                    [items addObject:[NSString stringWithFormat:@"%@=%@", path, value]];
+                } else if (value == [NSNull null]) {
+                    [items addObject:[NSString stringWithFormat:@"%@=(null)", path]];
+                }
+            }
+            if ([value isKindOfClass:[NSDictionary class]] || [value isKindOfClass:[NSArray class]]) {
+                PFCollectTaskProgressDigest(value, path, depth + 1, items);
+            }
+        }
+    } else if ([object isKindOfClass:[NSArray class]]) {
+        NSArray *array = (NSArray *)object;
+        NSUInteger limit = MIN(array.count, 10);
+        for (NSUInteger i = 0; i < limit && items.count < 48; i++) {
+            PFCollectTaskProgressDigest(array[i],
+                                        [NSString stringWithFormat:@"%@[%lu]", prefix, (unsigned long)i],
+                                        depth + 1, items);
+        }
+        if (array.count > limit && items.count < 48) {
+            [items addObject:[NSString stringWithFormat:@"%@[…]=truncated(%lu)",
+                              prefix, (unsigned long)(array.count - limit)]];
+        }
+    }
+}
+
+static id PFCallVerifiedResponseGetter(id serverObject, NSString *selectorName) {
+    if (!serverObject || ![selectorName isKindOfClass:[NSString class]]) return nil;
+    SEL selector = NSSelectorFromString(selectorName);
+    Method method = class_getInstanceMethod(object_getClass(serverObject), selector);
+    if (!method) return nil;
+    const char *encoding = method_getTypeEncoding(method);
+    if (!encoding || strcmp(encoding, "@16@0:8") != 0) return nil;
+    IMP implementation = method_getImplementation(method);
+    return implementation ? ((id (*)(id, SEL))implementation)(serverObject, selector) : nil;
+}
+
+static NSString *PFTaskResponseDigest(id serverObject, NSString *apiName) {
+    if (!serverObject || !PFIsTaskDigestAPI(apiName)) return nil;
+
+    id responseObject = PFCallVerifiedResponseGetter(serverObject, @"responseJSON");
+    if (![responseObject isKindOfClass:[NSDictionary class]]) {
+        id fallback = PFCallVerifiedResponseGetter(serverObject, @"_json");
+        if ([fallback isKindOfClass:[NSDictionary class]]) responseObject = fallback;
+    }
+    if (![responseObject isKindOfClass:[NSDictionary class]]) {
+        id fallback = PFCallVerifiedResponseGetter(serverObject, @"dataDict");
+        if ([fallback isKindOfClass:[NSDictionary class]]) responseObject = @{@"data": fallback};
+    }
+    if (![responseObject isKindOfClass:[NSDictionary class]]) return @"(response-dictionary-unavailable)";
+
+    NSDictionary *root = (NSDictionary *)responseObject;
+    NSMutableArray<NSString *> *retCodes = [NSMutableArray array];
+    id ret = root[@"ret"];
+    NSArray *retItems = [ret isKindOfClass:[NSArray class]] ? ret : ([ret isKindOfClass:[NSString class]] ? @[ret] : @[]);
+    for (id item in retItems) {
+        if (![item isKindOfClass:[NSString class]]) continue;
+        NSString *code = [[(NSString *)item componentsSeparatedByString:@"::"] firstObject];
+        if (PFIsSafeTaskEnumString(code) && retCodes.count < 4) [retCodes addObject:code];
+    }
+
+    NSMutableArray<NSString *> *progressItems = [NSMutableArray array];
+    id data = root[@"data"];
+    if (data) {
+        PFCollectTaskProgressDigest(data, @"data", 0, progressItems);
+    } else {
+        // Some server responses expose the useful payload at the root.
+        PFCollectTaskProgressDigest(root, @"root", 0, progressItems);
+    }
+
+    return [NSString stringWithFormat:@"ret=[%@] progress={%@}",
+            retCodes.count ? [retCodes componentsJoinedByString:@","] : @"(none)",
+            progressItems.count ? [progressItems componentsJoinedByString:@","] : @"(no-approved-fields)"];
+}
+
 static NSString *PFResponseTraceMetadata(id response) {
     if (!response) return @"response=(nil)";
     if ([response isKindOfClass:[NSDictionary class]] || [response isKindOfClass:[NSArray class]]) {
@@ -315,10 +479,20 @@ static NSString *PFResponseTraceMetadata(id response) {
     id apiVersion = PFInvokeObservedObjectGetter(response, @selector(apiVersion));
     id apiMethod = PFInvokeObservedObjectGetter(response, @selector(apiMethod));
     id nestedRequest = PFInvokeObservedObjectGetter(response, @selector(request));
+    NSString *apiName = [apiMethod isKindOfClass:[NSString class]] ? (NSString *)apiMethod : nil;
+    if (!apiName && nestedRequest) {
+        id associatedAPI = objc_getAssociatedObject(nestedRequest, &PFRequestAPIKey);
+        if ([associatedAPI isKindOfClass:[NSString class]]) apiName = associatedAPI;
+        if (!apiName) {
+            id getterAPI = PFInvokeObservedObjectGetter(nestedRequest, @selector(getApiName));
+            if ([getterAPI isKindOfClass:[NSString class]]) apiName = getterAPI;
+        }
+    }
     NSString *requestMeta = nestedRequest ? PFRequestTraceMetadata(nestedRequest) : @"request=(not-exposed)";
-    return [NSString stringWithFormat:@"class=%@ apiMethod=%@ apiVersion=%@ %@ shape={%@} safeCodes={%@}",
+    NSString *taskDigest = PFTaskResponseDigest(response, apiName);
+    return [NSString stringWithFormat:@"class=%@ apiMethod=%@ apiVersion=%@ %@ shape={%@} safeCodes={%@} taskDigest={%@}",
             PFObjectClassName(response), PFSafeIdentifier(apiMethod), PFSafeIdentifier(apiVersion),
-            requestMeta, PFSafeShape(response), PFSafeResultCodes(response)];
+            requestMeta, PFSafeShape(response), PFSafeResultCodes(response), taskDigest ?: @"(not-task-api)"];
 }
 
 static NSString *PFDelegateRequestTrace(id delegate) {
