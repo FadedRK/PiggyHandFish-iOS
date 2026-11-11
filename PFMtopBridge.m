@@ -40,29 +40,51 @@ static char PFRequestAPIKey;
 static char PFRequestVersionKey;
 static char PFRequestSceneIDKey;
 static char PFRequestDeliveryIDKey;
+static char PFRequestHasImplIDKey;
 
- // Process-local, non-reversible display labels. Raw identifiers are kept only
- // in request-associated memory and in these in-process lookup keys; they are
- // never written to the log.
+// Process-local anonymized labels. Canonical identifiers are retained only in
+// process memory for equality matching and are never emitted to logs or saved.
 static os_unfair_lock gPFTaskCorrelationLock = OS_UNFAIR_LOCK_INIT;
-static NSMutableDictionary<NSNumber *, NSString *> *gPFSceneRefMap;
+static NSMutableDictionary<NSString *, NSString *> *gPFSceneRefMap;
 static NSMutableDictionary<NSString *, NSString *> *gPFTaskRefMap;
 static NSUInteger gPFSceneRefSequence = 0;
 static NSUInteger gPFTaskRefSequence = 0;
 
-static BOOL PFIsOliverTaskRequest(id request) {
+// Normalize NSNumber and NSString IDs to the same in-memory representation.
+// This supports e.g. @(12345) and @"12345" without exposing the identifier.
+static NSString *PFCanonicalTaskIdentifier(id rawValue) {
+    if ([rawValue isKindOfClass:[NSNumber class]]) {
+        NSString *value = [(NSNumber *)rawValue stringValue];
+        return (value.length > 0 && value.length <= 128) ? value : nil;
+    }
+    if ([rawValue isKindOfClass:[NSString class]]) {
+        NSString *value = [(NSString *)rawValue stringByTrimmingCharactersInSet:
+                           [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (value.length == 0 || value.length > 128) return nil;
+        if ([value rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location != NSNotFound) return nil;
+        return value;
+    }
+    return nil;
+}
+
+static BOOL PFIsTaskCorrelationRequest(id request) {
     id api = objc_getAssociatedObject(request, &PFRequestAPIKey);
     if (![api isKindOfClass:[NSString class]]) return NO;
-    return [[(NSString *)api lowercaseString] hasPrefix:@"mtop.taobao.idle.task."];
+    NSString *normalizedAPI = [(NSString *)api lowercaseString];
+    return [normalizedAPI hasPrefix:@"mtop.taobao.idle.task."] ||
+           [normalizedAPI isEqualToString:@"mtop.taobao.pentaprism.scene.trigger"];
 }
 
 static NSString *PFTaskCorrelationForRequest(id request) {
-    if (!request || !PFIsOliverTaskRequest(request)) return nil;
+    if (!request || !PFIsTaskCorrelationRequest(request)) return nil;
 
-    id rawScene = objc_getAssociatedObject(request, &PFRequestSceneIDKey);
-    id rawDelivery = objc_getAssociatedObject(request, &PFRequestDeliveryIDKey);
-    BOOL hasScene = [rawScene isKindOfClass:[NSNumber class]];
-    BOOL hasDelivery = [rawDelivery isKindOfClass:[NSNumber class]];
+    NSString *sceneKey = PFCanonicalTaskIdentifier(
+        objc_getAssociatedObject(request, &PFRequestSceneIDKey));
+    NSString *deliveryKey = PFCanonicalTaskIdentifier(
+        objc_getAssociatedObject(request, &PFRequestDeliveryIDKey));
+    BOOL hasScene = sceneKey.length > 0;
+    BOOL hasDelivery = deliveryKey.length > 0;
+    BOOL hasImplID = [objc_getAssociatedObject(request, &PFRequestHasImplIDKey) boolValue];
     if (!hasScene && !hasDelivery) return nil;
 
     NSString *sceneTag = @"(none)";
@@ -73,7 +95,6 @@ static NSString *PFTaskCorrelationForRequest(id request) {
     if (!gPFTaskRefMap) gPFTaskRefMap = [NSMutableDictionary dictionary];
 
     if (hasScene) {
-        NSNumber *sceneKey = (NSNumber *)rawScene;
         sceneTag = gPFSceneRefMap[sceneKey];
         if (!sceneTag) {
             sceneTag = [NSString stringWithFormat:@"S%03lu", (unsigned long)(++gPFSceneRefSequence)];
@@ -81,11 +102,9 @@ static NSString *PFTaskCorrelationForRequest(id request) {
         }
     }
     if (hasDelivery) {
-        // Scope a delivery identifier to its scene to avoid accidental collisions
-        // if a host session reuses a numeric delivery ID in another scene.
-        NSString *sceneComponent = hasScene ? [(NSNumber *)rawScene stringValue] : @"(no-scene)";
-        NSString *deliveryComponent = [(NSNumber *)rawDelivery stringValue];
-        NSString *compoundKey = [NSString stringWithFormat:@"%@|%@", sceneComponent, deliveryComponent];
+        // Scope delivery IDs by canonical scene ID to avoid collisions across scenes.
+        NSString *sceneComponent = hasScene ? sceneKey : @"(no-scene)";
+        NSString *compoundKey = [NSString stringWithFormat:@"%@|%@", sceneComponent, deliveryKey];
         taskTag = gPFTaskRefMap[compoundKey];
         if (!taskTag) {
             taskTag = [NSString stringWithFormat:@"T%03lu", (unsigned long)(++gPFTaskRefSequence)];
@@ -94,24 +113,32 @@ static NSString *PFTaskCorrelationForRequest(id request) {
     }
     os_unfair_lock_unlock(&gPFTaskCorrelationLock);
 
-    return [NSString stringWithFormat:@"sceneRef=%@ taskRef=%@", sceneTag, taskTag];
+    NSString *base = [NSString stringWithFormat:@"sceneRef=%@ taskRef=%@", sceneTag, taskTag];
+    return hasImplID ? [base stringByAppendingString:@" hasImplId=1"] : base;
 }
 
 static void PFObserveTaskCorrelationParameter(id request, id key, id value) {
-    if (!request || !PFIsOliverTaskRequest(request) || ![key isKindOfClass:[NSString class]]) return;
+    if (!request || !PFIsTaskCorrelationRequest(request) || ![key isKindOfClass:[NSString class]]) return;
     NSString *keyString = (NSString *)key;
-    if ([keyString isEqualToString:@"sceneId"] && [value isKindOfClass:[NSNumber class]]) {
-        objc_setAssociatedObject(request, &PFRequestSceneIDKey, value, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    } else if ([keyString isEqualToString:@"deliveryId"] && [value isKindOfClass:[NSNumber class]]) {
-        objc_setAssociatedObject(request, &PFRequestDeliveryIDKey, value, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if ([keyString isEqualToString:@"sceneId"]) {
+        NSString *canonical = PFCanonicalTaskIdentifier(value);
+        if (canonical) objc_setAssociatedObject(request, &PFRequestSceneIDKey, canonical, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else if ([keyString isEqualToString:@"deliveryId"]) {
+        NSString *canonical = PFCanonicalTaskIdentifier(value);
+        if (canonical) objc_setAssociatedObject(request, &PFRequestDeliveryIDKey, canonical, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else if ([keyString isEqualToString:@"implId"] && value && value != [NSNull null]) {
+        objc_setAssociatedObject(request, &PFRequestHasImplIDKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
 
 static void PFObserveTaskCorrelationParameters(id request, id parameters) {
-    if (!request || !PFIsOliverTaskRequest(request) || ![parameters isKindOfClass:[NSDictionary class]]) return;
+    if (!request || !PFIsTaskCorrelationRequest(request) || ![parameters isKindOfClass:[NSDictionary class]]) return;
     NSDictionary *dictionary = (NSDictionary *)parameters;
     PFObserveTaskCorrelationParameter(request, @"sceneId", dictionary[@"sceneId"]);
     PFObserveTaskCorrelationParameter(request, @"deliveryId", dictionary[@"deliveryId"]);
+    if ([dictionary.allKeys containsObject:@"implId"]) {
+        PFObserveTaskCorrelationParameter(request, @"implId", dictionary[@"implId"]);
+    }
 }
 
 // Privacy-safe request/response logging: retain field names and value shapes,
