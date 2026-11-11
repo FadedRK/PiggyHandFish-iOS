@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <os/lock.h>
 
 static BOOL gPFMtopBridgeInstalled = NO;
 static BOOL gPFMtopBridgeObserversInstalled = NO;
@@ -37,6 +38,81 @@ static void (*PFOriginalMtopDelegateDidLoadCache)(id, SEL, id, id, id);
 static char PFRequestStartTimeKey;
 static char PFRequestAPIKey;
 static char PFRequestVersionKey;
+static char PFRequestSceneIDKey;
+static char PFRequestDeliveryIDKey;
+
+ // Process-local, non-reversible display labels. Raw identifiers are kept only
+ // in request-associated memory and in these in-process lookup keys; they are
+ // never written to the log.
+static os_unfair_lock gPFTaskCorrelationLock = OS_UNFAIR_LOCK_INIT;
+static NSMutableDictionary<NSNumber *, NSString *> *gPFSceneRefMap;
+static NSMutableDictionary<NSString *, NSString *> *gPFTaskRefMap;
+static NSUInteger gPFSceneRefSequence = 0;
+static NSUInteger gPFTaskRefSequence = 0;
+
+static BOOL PFIsOliverTaskRequest(id request) {
+    id api = objc_getAssociatedObject(request, &PFRequestAPIKey);
+    if (![api isKindOfClass:[NSString class]]) return NO;
+    return [[(NSString *)api lowercaseString] hasPrefix:@"mtop.taobao.idle.task."];
+}
+
+static NSString *PFTaskCorrelationForRequest(id request) {
+    if (!request || !PFIsOliverTaskRequest(request)) return nil;
+
+    id rawScene = objc_getAssociatedObject(request, &PFRequestSceneIDKey);
+    id rawDelivery = objc_getAssociatedObject(request, &PFRequestDeliveryIDKey);
+    BOOL hasScene = [rawScene isKindOfClass:[NSNumber class]];
+    BOOL hasDelivery = [rawDelivery isKindOfClass:[NSNumber class]];
+    if (!hasScene && !hasDelivery) return nil;
+
+    NSString *sceneTag = @"(none)";
+    NSString *taskTag = @"(none)";
+
+    os_unfair_lock_lock(&gPFTaskCorrelationLock);
+    if (!gPFSceneRefMap) gPFSceneRefMap = [NSMutableDictionary dictionary];
+    if (!gPFTaskRefMap) gPFTaskRefMap = [NSMutableDictionary dictionary];
+
+    if (hasScene) {
+        NSNumber *sceneKey = (NSNumber *)rawScene;
+        sceneTag = gPFSceneRefMap[sceneKey];
+        if (!sceneTag) {
+            sceneTag = [NSString stringWithFormat:@"S%03lu", (unsigned long)(++gPFSceneRefSequence)];
+            gPFSceneRefMap[sceneKey] = sceneTag;
+        }
+    }
+    if (hasDelivery) {
+        // Scope a delivery identifier to its scene to avoid accidental collisions
+        // if a host session reuses a numeric delivery ID in another scene.
+        NSString *sceneComponent = hasScene ? [(NSNumber *)rawScene stringValue] : @"(no-scene)";
+        NSString *deliveryComponent = [(NSNumber *)rawDelivery stringValue];
+        NSString *compoundKey = [NSString stringWithFormat:@"%@|%@", sceneComponent, deliveryComponent];
+        taskTag = gPFTaskRefMap[compoundKey];
+        if (!taskTag) {
+            taskTag = [NSString stringWithFormat:@"T%03lu", (unsigned long)(++gPFTaskRefSequence)];
+            gPFTaskRefMap[compoundKey] = taskTag;
+        }
+    }
+    os_unfair_lock_unlock(&gPFTaskCorrelationLock);
+
+    return [NSString stringWithFormat:@"sceneRef=%@ taskRef=%@", sceneTag, taskTag];
+}
+
+static void PFObserveTaskCorrelationParameter(id request, id key, id value) {
+    if (!request || !PFIsOliverTaskRequest(request) || ![key isKindOfClass:[NSString class]]) return;
+    NSString *keyString = (NSString *)key;
+    if ([keyString isEqualToString:@"sceneId"] && [value isKindOfClass:[NSNumber class]]) {
+        objc_setAssociatedObject(request, &PFRequestSceneIDKey, value, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else if ([keyString isEqualToString:@"deliveryId"] && [value isKindOfClass:[NSNumber class]]) {
+        objc_setAssociatedObject(request, &PFRequestDeliveryIDKey, value, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+static void PFObserveTaskCorrelationParameters(id request, id parameters) {
+    if (!request || !PFIsOliverTaskRequest(request) || ![parameters isKindOfClass:[NSDictionary class]]) return;
+    NSDictionary *dictionary = (NSDictionary *)parameters;
+    PFObserveTaskCorrelationParameter(request, @"sceneId", dictionary[@"sceneId"]);
+    PFObserveTaskCorrelationParameter(request, @"deliveryId", dictionary[@"deliveryId"]);
+}
 
 // Privacy-safe request/response logging: retain field names and value shapes,
 // but never dump arbitrary parameter values, cookies, tokens, signatures, or bodies.
@@ -198,9 +274,10 @@ static NSString *PFRequestTraceMetadata(id request) {
         : PFInvokeObservedObjectGetter(request, @selector(getApiName));
     id version = [associatedVersion isKindOfClass:[NSString class]] ? associatedVersion
         : PFInvokeObservedObjectGetter(request, @selector(getApiVersion));
-    return [NSString stringWithFormat:@"request=%p requestClass=%@ api=%@ version=%@ elapsedSinceInitMs=%.1f",
+    NSString *correlation = PFTaskCorrelationForRequest(request);
+    return [NSString stringWithFormat:@"request=%p requestClass=%@ api=%@ version=%@ elapsedSinceInitMs=%.1f %@",
             request, PFObjectClassName(request), PFSafeIdentifier(api), PFSafeIdentifier(version),
-            PFElapsedSinceRequestInit(request)];
+            PFElapsedSinceRequestInit(request), correlation ?: @""];
 }
 
 static NSString *PFResponseTraceMetadata(id response) {
@@ -304,22 +381,28 @@ static id PFHookedMtopRequestInitWithBiz(id self, SEL _cmd, id api, id version, 
 static id PFHookedMtopRequestAddParameter(id self, SEL _cmd, id value, id key) {
     id (*original)(id, SEL, id, id) = PFIsApiRequestObject(self)
         ? PFOriginalApiRequestAddParameter : PFOriginalMtopRequestAddParameter;
-    PFLog(@"MTOP_EVENT stage=request_parameter request=%p class=%@ source=addParameter key=%@ valueShape=%@ elapsedMs=%.1f",
-          self, PFObjectClassName(self), PFSafeIdentifier(key), PFSafeShape(value), PFElapsedSinceRequestInit(self));
+    PFObserveTaskCorrelationParameter(self, key, value);
+    PFLog(@"MTOP_EVENT stage=request_parameter request=%p class=%@ source=addParameter key=%@ valueShape=%@ taskCorrelation={%@} elapsedMs=%.1f",
+          self, PFObjectClassName(self), PFSafeIdentifier(key), PFSafeShape(value),
+          PFTaskCorrelationForRequest(self) ?: @"(none)", PFElapsedSinceRequestInit(self));
     return original ? original(self, _cmd, value, key) : self;
 }
 
 static id PFHookedMtopRequestAddHttpParameter(id self, SEL _cmd, id value, id key) {
     id (*original)(id, SEL, id, id) = PFIsApiRequestObject(self)
         ? PFOriginalApiRequestAddHttpParameter : PFOriginalMtopRequestAddHttpParameter;
-    PFLog(@"MTOP_EVENT stage=request_parameter request=%p class=%@ source=addHttpParameter key=%@ valueShape=%@ elapsedMs=%.1f",
-          self, PFObjectClassName(self), PFSafeIdentifier(key), PFSafeShape(value), PFElapsedSinceRequestInit(self));
+    PFObserveTaskCorrelationParameter(self, key, value);
+    PFLog(@"MTOP_EVENT stage=request_parameter request=%p class=%@ source=addHttpParameter key=%@ valueShape=%@ taskCorrelation={%@} elapsedMs=%.1f",
+          self, PFObjectClassName(self), PFSafeIdentifier(key), PFSafeShape(value),
+          PFTaskCorrelationForRequest(self) ?: @"(none)", PFElapsedSinceRequestInit(self));
     return original ? original(self, _cmd, value, key) : self;
 }
 
 static id PFHookedMtopRequestAddHttpParameterNoneURLEncoding(id self, SEL _cmd, id value, id key) {
-    PFLog(@"MTOP_EVENT stage=request_parameter request=%p class=%@ source=addHttpParameterNoneURLEncoding key=%@ valueShape=%@ elapsedMs=%.1f",
-          self, PFObjectClassName(self), PFSafeIdentifier(key), PFSafeShape(value), PFElapsedSinceRequestInit(self));
+    PFObserveTaskCorrelationParameter(self, key, value);
+    PFLog(@"MTOP_EVENT stage=request_parameter request=%p class=%@ source=addHttpParameterNoneURLEncoding key=%@ valueShape=%@ taskCorrelation={%@} elapsedMs=%.1f",
+          self, PFObjectClassName(self), PFSafeIdentifier(key), PFSafeShape(value),
+          PFTaskCorrelationForRequest(self) ?: @"(none)", PFElapsedSinceRequestInit(self));
     return PFOriginalMtopRequestAddHttpParameterNoneURLEncoding
         ? PFOriginalMtopRequestAddHttpParameterNoneURLEncoding(self, _cmd, value, key) : self;
 }
@@ -327,16 +410,20 @@ static id PFHookedMtopRequestAddHttpParameterNoneURLEncoding(id self, SEL _cmd, 
 static id PFHookedMtopRequestAddHttpParameters(id self, SEL _cmd, id params) {
     id (*original)(id, SEL, id) = PFIsApiRequestObject(self)
         ? PFOriginalApiRequestAddHttpParameters : PFOriginalMtopRequestAddHttpParameters;
-    PFLog(@"MTOP_EVENT stage=request_parameter_batch request=%p class=%@ source=addHttpParameters params={%@} elapsedMs=%.1f",
-          self, PFObjectClassName(self), PFSafeShape(params), PFElapsedSinceRequestInit(self));
+    PFObserveTaskCorrelationParameters(self, params);
+    PFLog(@"MTOP_EVENT stage=request_parameter_batch request=%p class=%@ source=addHttpParameters params={%@} taskCorrelation={%@} elapsedMs=%.1f",
+          self, PFObjectClassName(self), PFSafeShape(params),
+          PFTaskCorrelationForRequest(self) ?: @"(none)", PFElapsedSinceRequestInit(self));
     return original ? original(self, _cmd, params) : self;
 }
 
 static id PFHookedMtopRequestAddParameters(id self, SEL _cmd, id params) {
     id (*original)(id, SEL, id) = PFIsApiRequestObject(self)
         ? PFOriginalApiRequestAddParameters : PFOriginalMtopRequestAddParameters;
-    PFLog(@"MTOP_EVENT stage=request_parameter_batch request=%p class=%@ source=addParameters params={%@} elapsedMs=%.1f",
-          self, PFObjectClassName(self), PFSafeShape(params), PFElapsedSinceRequestInit(self));
+    PFObserveTaskCorrelationParameters(self, params);
+    PFLog(@"MTOP_EVENT stage=request_parameter_batch request=%p class=%@ source=addParameters params={%@} taskCorrelation={%@} elapsedMs=%.1f",
+          self, PFObjectClassName(self), PFSafeShape(params),
+          PFTaskCorrelationForRequest(self) ?: @"(none)", PFElapsedSinceRequestInit(self));
     return original ? original(self, _cmd, params) : self;
 }
 
