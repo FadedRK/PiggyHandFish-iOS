@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 #import "PFLogger.h"
 #import "PFScout.h"
+#import "PFTaskAssistant.h"
 #import <dispatch/dispatch.h>
 
 static NSString *PFActionLogPath(void) {
@@ -70,6 +71,14 @@ NSArray<PFAction *> *PFRegisteredActions(void) {
                 });
             }];
 
+        PFAction *taskStatus = [PFAction actionWithIdentifier:@"view_task_status"
+            title:@"查看鱼币任务状态"
+            detail:@"查看最近一次由闲鱼正常加载的任务列表、进度和事件观察摘要；不会主动发送任务请求。"
+            handler:^(PFActionCompletion completion) {
+                NSString *summary = PFTaskAssistantFormattedSummary();
+                if (completion) completion(YES, summary);
+            }];
+
         PFAction *runScout = [PFAction actionWithIdentifier:@"run_recon"
             title:@"运行 Runtime 侦察"
             detail:@"在后台枚举匹配的 Objective-C 类和方法。"
@@ -133,7 +142,7 @@ NSArray<PFAction *> *PFRegisteredActions(void) {
                 if (completion) completion(YES, @"运行状态已写入诊断日志。");
             }];
 
-        actions = @[openFishCoin, runScout, copyLog, clearLog, logStatus];
+        actions = @[openFishCoin, taskStatus, runScout, copyLog, clearLog, logStatus];
     });
     return actions;
 }
