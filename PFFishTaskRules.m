@@ -22,7 +22,38 @@ NSInteger const PFFishTaskSceneID=496;
 static NSString *S(id x){return [x isKindOfClass:NSString.class]?x:(x?[x description]:@"");}
 static NSDictionary *D(id x){return [x isKindOfClass:NSDictionary.class]?x:nil;}
 BOOL PFFishTaskNeedsClaim(NSDictionary *t){NSDictionary*b=D(t[@"taskBenefitDTO"]);NSString*s=S(t[@"idleTaskStatus"]);BOOL n=[b[@"needBenefit"] boolValue]||[S(b[@"needBenefit"]) isEqualToString:@"true"];return [s isEqualToString:@"AWARD"]||([s isEqualToString:@"COMPLETE"]&&n);}
-PFFishTaskKind PFFishClassifyTask(NSDictionary*t){if(PFFishTaskNeedsClaim(t))return PFFishTaskKindClaim;if(![S(t[@"idleTaskStatus"]) isEqualToString:@"ACCEPTED"])return PFFishTaskKindUnknown;NSDictionary*m=D(t[@"materialDTO"]);NSString*a=S(m[@"action"]),*l=a.lowercaseString,*title=S(m[@"title"]).lowercaseString;if([a containsString:@"showAds"]&&[a containsString:@"adType=ecMall"])return PFFishTaskKindECMallAd;if([l containsString:@"search.html"]||[title containsString:@"搜一搜"]||[title containsString:@"搜索"])return PFFishTaskKindSearch;if([a containsString:@"idleCoinFeesAnchor"])return PFFishTaskKindBrowse;if([S(m[@"actionType"]) isEqualToString:@"TREASURE"]||[title containsString:@"夺宝"]||[title containsString:@"寻宝"])return PFFishTaskKindTreasure;return PFFishTaskKindTrigger;}
+PFFishTaskKind PFFishClassifyTask(NSDictionary *task) {
+    if (PFFishTaskNeedsClaim(task)) return PFFishTaskKindClaim;
+    if (![S(task[@"idleTaskStatus"]) isEqualToString:@"ACCEPTED"]) return PFFishTaskKindUnknown;
+
+    NSDictionary *material = D(task[@"materialDTO"]);
+    NSString *action = S(material[@"action"]);
+    NSString *lowerAction = action.lowercaseString;
+    NSString *title = S(material[@"title"]).lowercaseString;
+    NSString *actionType = S(material[@"actionType"]);
+
+    if ([action containsString:@"showAds"] && [action containsString:@"adType=ecMall"]) {
+        return PFFishTaskKindECMallAd;
+    }
+    if ([actionType isEqualToString:@"clickFinish"] ||
+        [actionType isEqualToString:@"EXCUTE"] ||
+        [actionType isEqualToString:@"PLAINVISIT"] ||
+        [actionType isEqualToString:@"VISIT"] ||
+        [actionType isEqualToString:@"SYSTEM_SWITCH"] ||
+        ([title containsString:@"点击"] && [title containsString:@"好物"])) {
+        return PFFishTaskKindGoodItemClick;
+    }
+    if ([lowerAction containsString:@"search.html"] ||
+        [title containsString:@"搜一搜"] || [title containsString:@"搜索"]) {
+        return PFFishTaskKindSearch;
+    }
+    if ([action containsString:@"idleCoinFeesAnchor"]) return PFFishTaskKindBrowse;
+    if ([actionType isEqualToString:@"TREASURE"] ||
+        [title containsString:@"夺宝"] || [title containsString:@"寻宝"]) {
+        return PFFishTaskKindTreasure;
+    }
+    return PFFishTaskKindTrigger;
+}
 NSArray<PFFishTask*>*PFFishParseTaskListResponse(NSDictionary*r){NSArray*l=D(r[@"data"])[@"taskList"];if(![l isKindOfClass:NSArray.class])return @[];NSMutableArray*o=[NSMutableArray array];for(NSDictionary*x in l){if(![x isKindOfClass:NSDictionary.class])continue;PFFishTask*t=[PFFishTask new];NSDictionary*m=D(x[@"materialDTO"]),*p=D(x[@"progressDTO"]),*b=D(x[@"taskBenefitDTO"]);t.raw=x;t.deliveryID=S(x[@"deliveryId"]);t.status=S(x[@"idleTaskStatus"]);t.sceneID=S(x[@"sceneId"]);t.title=S(m[@"title"]);t.actionType=S(m[@"actionType"]);t.action=S(m[@"action"]);t.needBenefit=[b[@"needBenefit"] boolValue];t.times=[p[@"times"] integerValue];t.maxTimes=[p[@"maxTimes"] integerValue];t.kind=PFFishClassifyTask(x);if(t.deliveryID.length)[o addObject:t];}return o;}
 NSDictionary*PFFishTriggerParameters(PFFishTask*t){if(!t.deliveryID.length)return @{};NSMutableDictionary*p=[@{@"sceneId":@(496),@"deliveryId":t.deliveryID}mutableCopy];NSURLComponents*c=[NSURLComponents componentsWithString:t.action];for(NSString*k in @[@"implId",@"channelSrp",@"adPositionCode",@"adOrderPositionCode",@"refpid",@"k_usetanx"])for(NSURLQueryItem*q in c.queryItems)if([q.name isEqualToString:k]&&q.value.length){p[k]=q.value;break;}NSString*f=S(t.raw[@"fromToken"]),*g=S(t.raw[@"groupId"]);if(f.length)p[@"fromToken"]=f;if(g.length)p[@"groupId"]=@([g longLongValue]);return p;}
 NSDictionary*PFFishSearchTriggerParameters(PFFishTask*t){return PFFishTriggerParameters(t);}
