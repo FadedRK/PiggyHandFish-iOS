@@ -1,5 +1,6 @@
 #import "PFMtopBridge.h"
 #import "PFLogger.h"
+#import "PFTaskAssistant.h"
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -79,6 +80,38 @@ static NSString *PFCanonicalTaskIdentifier(id rawValue) {
         value = [value substringFromIndex:first];
     }
     return value;
+}
+
+// Resolve the same opaque taskRef used by MTOP request logs. This helper is
+// also used when a task-list response contains many delivery IDs in one body.
+NSString *PFTaskReferenceForIdentifiers(id rawSceneID, id rawDeliveryID) {
+    NSString *sceneKey = PFCanonicalTaskIdentifier(rawSceneID);
+    NSString *deliveryKey = PFCanonicalTaskIdentifier(rawDeliveryID);
+    if (deliveryKey.length == 0) return nil;
+
+    NSString *sceneTag = @"(none)";
+    NSString *taskTag = nil;
+    os_unfair_lock_lock(&gPFTaskCorrelationLock);
+    if (!gPFSceneRefMap) gPFSceneRefMap = [NSMutableDictionary dictionary];
+    if (!gPFTaskRefMap) gPFTaskRefMap = [NSMutableDictionary dictionary];
+
+    if (sceneKey.length) {
+        sceneTag = gPFSceneRefMap[sceneKey];
+        if (!sceneTag) {
+            sceneTag = [NSString stringWithFormat:@"S%03lu", (unsigned long)(++gPFSceneRefSequence)];
+            gPFSceneRefMap[sceneKey] = sceneTag;
+        }
+    }
+
+    NSString *sceneComponent = sceneKey.length ? sceneKey : @"(no-scene)";
+    NSString *taskMapKey = [NSString stringWithFormat:@"%@|%@", sceneComponent, deliveryKey];
+    taskTag = gPFTaskRefMap[taskMapKey];
+    if (!taskTag) {
+        taskTag = [NSString stringWithFormat:@"T%03lu", (unsigned long)(++gPFTaskRefSequence)];
+        gPFTaskRefMap[taskMapKey] = taskTag;
+    }
+    os_unfair_lock_unlock(&gPFTaskCorrelationLock);
+    return taskTag;
 }
 
 static BOOL PFIsTaskCorrelationRequest(id request) {
@@ -433,21 +466,22 @@ static id PFCallVerifiedResponseGetter(id serverObject, NSString *selectorName) 
     return implementation ? ((id (*)(id, SEL))implementation)(serverObject, selector) : nil;
 }
 
+static NSDictionary *PFReadTaskResponseDictionary(id serverObject) {
+    id value = PFCallVerifiedResponseGetter(serverObject, @"responseJSON");
+    if (![value isKindOfClass:[NSDictionary class]]) {
+        value = PFCallVerifiedResponseGetter(serverObject, @"_json");
+    }
+    if (![value isKindOfClass:[NSDictionary class]]) {
+        value = PFCallVerifiedResponseGetter(serverObject, @"dataDict");
+    }
+    return [value isKindOfClass:[NSDictionary class]] ? value : nil;
+}
+
 static NSString *PFTaskResponseDigest(id serverObject, NSString *apiName) {
     if (!serverObject || !PFIsTaskDigestAPI(apiName)) return nil;
 
-    id responseObject = PFCallVerifiedResponseGetter(serverObject, @"responseJSON");
-    if (![responseObject isKindOfClass:[NSDictionary class]]) {
-        id fallback = PFCallVerifiedResponseGetter(serverObject, @"_json");
-        if ([fallback isKindOfClass:[NSDictionary class]]) responseObject = fallback;
-    }
-    if (![responseObject isKindOfClass:[NSDictionary class]]) {
-        id fallback = PFCallVerifiedResponseGetter(serverObject, @"dataDict");
-        if ([fallback isKindOfClass:[NSDictionary class]]) responseObject = @{@"data": fallback};
-    }
-    if (![responseObject isKindOfClass:[NSDictionary class]]) return @"(response-dictionary-unavailable)";
-
-    NSDictionary *root = (NSDictionary *)responseObject;
+    NSDictionary *root = PFReadTaskResponseDictionary(serverObject);
+    if (!root) return @"(response-dictionary-unavailable)";
     NSMutableArray<NSString *> *retCodes = [NSMutableArray array];
     id ret = root[@"ret"];
     NSArray *retItems = [ret isKindOfClass:[NSArray class]] ? ret : ([ret isKindOfClass:[NSString class]] ? @[ret] : @[]);
@@ -660,13 +694,38 @@ static void PFHookedMtopBridgePending(id self, SEL _cmd, id pending, id request,
     if (PFOriginalMtopBridgePending) PFOriginalMtopBridgePending(self, _cmd, pending, request, delegate);
 }
 
+static NSString *PFTaskAPINameForDelegate(id delegate, id response) {
+    id request = PFInvokeObservedObjectGetter(delegate, @selector(request));
+    id api = request ? objc_getAssociatedObject(request, &PFRequestAPIKey) : nil;
+    if (![api isKindOfClass:[NSString class]] && request) {
+        api = PFInvokeObservedObjectGetter(request, @selector(getApiName));
+    }
+    if (![api isKindOfClass:[NSString class]]) {
+        api = PFInvokeObservedObjectGetter(response, @selector(apiMethod));
+    }
+    return [api isKindOfClass:[NSString class]] ? (NSString *)api : nil;
+}
+
 static void PFHookedMtopDelegateSuccess(id self, SEL _cmd, id response) {
+    id request = PFInvokeObservedObjectGetter(self, @selector(request));
+    NSString *apiName = PFTaskAPINameForDelegate(self, response);
+    NSString *correlation = PFTaskCorrelationForRequest(request);
+    NSDictionary *responseJSON = PFReadTaskResponseDictionary(response);
+    if (apiName.length && responseJSON) {
+        PFTaskAssistantConsumeResponse(apiName, responseJSON, correlation);
+    }
+
     PFLog(@"MTOP_EVENT stage=delegate_success delegate=%p delegateClass=%@ requestTrace={%@} responseTrace={%@}",
           self, PFObjectClassName(self), PFDelegateRequestTrace(self), PFResponseTraceMetadata(response));
     if (PFOriginalMtopDelegateSuccess) PFOriginalMtopDelegateSuccess(self, _cmd, response);
 }
 
 static void PFHookedMtopDelegateFailure(id self, SEL _cmd, id error) {
+    id request = PFInvokeObservedObjectGetter(self, @selector(request));
+    NSString *apiName = PFTaskAPINameForDelegate(self, nil);
+    NSString *correlation = PFTaskCorrelationForRequest(request);
+    if (apiName.length) PFTaskAssistantRecordFailure(apiName, correlation);
+
     PFLog(@"MTOP_EVENT stage=delegate_failure delegate=%p delegateClass=%@ requestTrace={%@} error={%@}",
           self, PFObjectClassName(self), PFDelegateRequestTrace(self), PFErrorSummary(error));
     if (PFOriginalMtopDelegateFailure) PFOriginalMtopDelegateFailure(self, _cmd, error);
