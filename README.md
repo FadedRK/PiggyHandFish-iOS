@@ -27,6 +27,19 @@ Available controls:
 
 The logging toggles currently affect the running process only; they are not persisted after the app exits. The Settings entry is added when a native view controller with a Settings-related class name or title appears.
 
+## v0.1 Task Assistant
+
+The first task-assistant slice is a **passive, in-memory task tracker**:
+
+- Consumes task-list and task-related responses produced by normal Xianyu app activity.
+- Parses deliveryId, idleTaskStatus, progressDTO.times/maxTimes, taskBenefitDTO.needBenefit, and the task's display title/type.
+- Reuses the bridge's process-local opaque Txxx labels; raw task identifiers are not written to task-assistant logs or persisted.
+- Recognizes the observed good-item click task family (clickFinish, EXCUTE, PLAINVISIT, VISIT, and SYSTEM_SWITCH) separately from browse/search/treasure task types.
+- Counts observed pentaprism.scene.trigger callbacks and distinct opaque implRef labels for diagnosis. These counts are explicitly **not** treated as valid task progress or proof of a reward.
+- Adds **查看鱼币任务状态** to the plugin menu. The summary reflects the most recent task list loaded by Xianyu itself.
+
+Task snapshots live only in memory and reset when the host process exits. The assistant does not send task-list/detail/trigger/benefit requests, replay requests, automate clicks, or claim rewards. Task status is taken from the next task-list response observed from the host app.
+
 ## Native Action registry
 
 The menu is populated by PFRegisteredActions() in PFAction.m. Current Actions:
