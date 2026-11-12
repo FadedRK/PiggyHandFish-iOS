@@ -25,6 +25,7 @@ FOUNDATION_EXPORT NSInteger const PFFishTaskSceneID;
 typedef NS_ENUM(NSInteger, PFFishTaskKind) {
     PFFishTaskKindUnknown = 0,
     PFFishTaskKindClaim,
+    PFFishTaskKindGoodItemClick,
     PFFishTaskKindTrigger,
     PFFishTaskKindSearch,
     PFFishTaskKindBrowse,
